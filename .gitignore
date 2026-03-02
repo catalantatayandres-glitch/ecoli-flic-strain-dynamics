@@ -1,0 +1,19 @@
+# Never upload sequencing data
+*.fastq
+*.fastq.gz
+*.fq.gz
+*.bam
+*.cram
+*.sam
+*.bai
+*.crai
+
+# Logs and outputs
+logs/
+results/
+work/
+tmp/
+
+# R junk
+.Rhistory
+.RData
