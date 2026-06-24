@@ -1,0 +1,504 @@
+---
+title: "02 — Community Analyses"
+subtitle: "DADA2 Pipeline · Parameter Sensitivity & Sample Type Assessment"
+author: "Andrés Catalán Tatay"
+date: "`r format(Sys.Date(), '%d %B %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_float:
+      collapsed: false
+    toc_depth: 3
+    theme: flatly
+    highlight: tango
+    code_folding: show
+    fig_width: 14
+    fig_height: 8
+    df_print: paged
+---
+
+<!--
+================================================================================
+  Project : fliC Amplicon Sequencing for High-Resolution Profiling of E. coli
+            in the Infant Gut Microbiome
+  Author  : Andrés Catalán Tatay
+  Part    : Analysis — Step 02
+  Purpose : Community-level analysis of all 96 DADA2 pipeline parameter
+            combinations. Covers ASV sharing, distance matrices, PERMANOVA,
+            PCoA ordination, and dendrogram heatmaps.
+  Inputs  : data/cases/          — 96 RDS files (one per parameter combination)
+  Outputs : results/02_community_analyses/
+              01_asv_sharing/    — ASV sharing bar charts and CSV tables
+              02_pcoa/           — PCoA plots (Jaccard + Aitchison, 6 panels)
+              03_dendrogram/     — Hierarchical clustering heatmaps
+              04_permanova/      — PERMANOVA results plot and CSV
+              05_combined/       — Summary figure combining all panels
+              distances/         — Cached distance matrix RDS files
+  Companion: 02_community_analyses_functions.R
+================================================================================
+-->
+
+```{r knitr-setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo      = TRUE,
+  warning   = FALSE,
+  message   = FALSE,
+  dpi       = 150,
+  fig.align = "center",
+  out.width = "100%"
+)
+```
+
+---
+
+# Overview
+
+This notebook performs a complete community-level analysis on **all 96 DADA2
+pipeline cases**, covering every combination of five parameters:
+
+| Parameter         | Levels |
+|-------------------|--------|
+| **Filtering**     | Loose · Strict |
+| **Pooling**       | FALSE · pseudo · TRUE |
+| **Omega (χ²)**   | O1e-40 · O1e-70 · O1e-100 · O1e-200 |
+| **Band size**     | 32 · 64 |
+| **Error model**   | Binned · PacBio |
+| **Sample type**   | Individual · Positive (mockmix) · Negative |
+
+2 × 3 × 4 × 2 × 2 = **96 cases**
+
+
+# 0 · Packages & Setup
+
+```{r install-check, results='hide'}
+# ── Install any missing packages ───────────────────────────────────────────────
+bioc_pkgs <- c("phyloseq", "ComplexHeatmap")
+cran_pkgs <- c("ggplot2", "dplyr", "tidyr", "tibble", "vegan", "ape",
+               "patchwork", "RColorBrewer", "stringr", "ggrepel",
+               "scales", "circlize", "grid", "parallel")
+
+all_pkgs <- c(bioc_pkgs, cran_pkgs)
+miss     <- all_pkgs[!vapply(all_pkgs, requireNamespace,
+                              logical(1L), quietly = TRUE)]
+if (length(miss) > 0L) {
+  miss_bioc <- intersect(miss, bioc_pkgs)
+  miss_cran <- setdiff(miss, bioc_pkgs)
+  if (length(miss_bioc) > 0L) {
+    if (!requireNamespace("BiocManager", quietly = TRUE))
+      install.packages("BiocManager")
+    BiocManager::install(miss_bioc, ask = FALSE, update = FALSE)
+  }
+  if (length(miss_cran) > 0L)
+    install.packages(miss_cran, dependencies = TRUE)
+}
+invisible(lapply(all_pkgs, library, character.only = TRUE))
+```
+
+```{r source-functions}
+# ── Load the companion functions file ─────────────────────────────────────────
+fn_file <- "02_community_analyses_functions.R"
+if (!file.exists(fn_file))
+  stop("Functions file not found: '", fn_file,
+       "'\nPlace it in the same folder as this Rmd.")
+source(fn_file)
+message("Functions loaded from: ", fn_file)
+```
+
+```{r define-paths}
+# ── Paths ─────────────────────────────────────────────────────────────────────
+# All paths are relative to the project root.
+# Set your working directory to the project root before knitting.
+INPUT_DIR  <- "data/cases"
+OUTPUT_DIR <- "results/02_community_analyses"
+
+# ── Parallelism ───────────────────────────────────────────────────────────────
+# Windows does not support mclapply → force sequential
+N_CORES <- if (.Platform$OS.type == "windows") 1L else
+             max(1L, parallel::detectCores() - 1L)
+message("Parallel cores available: ", N_CORES)
+
+# ── Create output sub-folders ─────────────────────────────────────────────────
+subdirs <- c("01_asv_sharing", "02_pcoa",
+             "03_dendrogram",  "04_permanova", "05_combined", "distances")
+invisible(lapply(file.path(OUTPUT_DIR, subdirs),
+                 dir.create, recursive = TRUE, showWarnings = FALSE))
+
+cat("Input : ", INPUT_DIR,  "\n")
+cat("Output: ", OUTPUT_DIR, "\n")
+```
+
+---
+
+# 1 · Load Cases (Change A – all 96)
+
+> **Change A** – All 96 cases are loaded without any filename filtering.
+> Expected result: **96 cases** (2 filter × 3 pool × 4 omega × 2 band × 2 error model).
+
+```{r load-cases}
+cases <- load_all_cases(INPUT_DIR, n_cores = N_CORES)
+cat("\nCases loaded:", length(cases), " (expected: 96)\n\n")
+
+# Show the full parameter grid
+param_df <- do.call(rbind,
+                    lapply(cases, function(x) as.data.frame(x$params,
+                                                             stringsAsFactors = FALSE)))
+cat("Parameter grid (cases loaded):\n")
+print(with(param_df,
+           table(Filter_Mode = Filter_Mode, Pool = Pool,
+                 Omega = Omega, Band_Size = Band_Size, Error_Model = Error_Model)))
+```
+
+---
+
+# 2 · Remove Pure Mocks & Enrich Metadata (Change B)
+
+> Pure mock controls (`S_KPC*`, `S_OXA*`, `S_E15`, `S_E25`)
+> are removed from every phyloseq object **before** classification.
+> Only MOCKMIX community standards remain as **Positive**.
+> Real patient/environment samples are labelled **Individual**.
+>
+> **IMPORTANT:** After running this chunk, inspect the printed sample lists
+> and verify that no unwanted names appear in any category.
+
+```{r enrich-remove-mocks}
+# Enrich metadata (adds Filter_Mode, Pool, Omega, Band_Size, Error_Model,
+# sample_type) AND removes pure mock controls from each phyloseq.
+ps_list <- enrich_and_clean_cases(cases, n_cores = N_CORES)
+
+cat("\n── Sample counts per case after pure mock removal ──\n")
+n_per_case <- vapply(ps_list, nsamples, integer(1L))
+cat("  Min:", min(n_per_case),
+    " Max:", max(n_per_case),
+    " Mean:", round(mean(n_per_case), 1), "\n\n")
+```
+
+---
+
+# 3 · Rarefaction (Change C – fixed at 1 500 reads)
+
+> **Change C** – Sequencing depth is normalised using `rarefy_even_depth()`
+> to a **fixed depth of 1 500 reads** per sample.
+>
+> **Handling low-depth samples (any type):**
+> - Samples with reads ≥ 1 500 are rarefied normally.
+> - Samples with reads < 1 500 are **kept unrarefied** (they would
+>   otherwise be dropped entirely, losing that sample from the analysis).
+>   A warning is printed for any such sample.
+>
+> A fixed seed is used for full reproducibility.
+
+```{r rarefy}
+# Fixed rarefaction depth of 1 500 reads (set manually, not derived from data)
+min_depth <- 1500L
+cat("Rarefaction depth: ", min_depth, " reads (fixed by user)\n\n")
+
+# Rarefy all 96 cases (seed = 42 for reproducibility)
+ps_list_rarefied <- rarefy_cases(ps_list,
+                                  min_depth = min_depth,
+                                  seed      = 42L)
+cat("\nRarefaction complete. Sample counts after rarefaction:\n")
+n_after <- vapply(ps_list_rarefied, nsamples, integer(1L))
+cat("  Min:", min(n_after),
+    " Max:", max(n_after),
+    " Mean:", round(mean(n_after), 1), "\n")
+```
+
+---
+
+# 4 · Merge All 96 Cases
+
+```{r merge-cases}
+# Merge all 96 rarefied cases; sample names are already unique (__caseN suffix)
+ps_all   <- merge_all_cases(ps_list_rarefied)
+meta_all <- as.data.frame(sample_data(ps_all))
+
+cat("\n=== Merged phyloseq ===\n")
+print(ps_all)
+
+# Verify sample classification
+cat("\n── Sample type distribution (after pure mock removal & rarefaction) ──\n")
+cat("  Negative   = S_TRIS (buffer-only controls)\n")
+cat("  Positive   = MOCKMIX community standards\n")
+cat("  Individual = S_<number> (real patient/environment samples)\n\n")
+print(table(Sample_type = meta_all$sample_type))
+
+# Print representative names per type for manual verification
+for (st in c("Individual", "Positive", "Negative")) {
+  ex <- unique(sub("__case\\d+$", "",
+                   rownames(meta_all)[meta_all$sample_type == st]))
+  cat("\n  ", st, "– examples: ", paste(head(ex, 8L), collapse = ", "), "\n")
+}
+
+# Parameter distributions
+cat("\nParameter distributions in merged phyloseq:\n")
+cat("  Pool        :\n"); print(table(meta_all$Pool))
+cat("  Filter_Mode :\n"); print(table(meta_all$Filter_Mode))
+cat("  Omega       :\n"); print(table(meta_all$Omega))
+cat("  Band_Size   :\n"); print(table(meta_all$Band_Size))
+cat("  Error_Model :\n"); print(table(meta_all$Error_Model))
+```
+
+---
+
+# 5 · ASV Origin Analysis
+
+> All 96 cases contribute to every comparison. No parameter is held
+> fixed or excluded during ASV sharing analysis.
+>
+> Now includes comparisons for all 5 DADA2 parameters:
+> **Filter_Mode / Pool / Omega / Band_Size / Error_Model**
+
+```{r asv-sharing-compute}
+# All 5 parameters (Change D)
+params_sharing <- c("Filter_Mode", "Pool", "Omega", "Band_Size", "Error_Model")
+
+sharing_results <- setNames(
+  lapply(params_sharing, function(p) {
+    summarise_asv_sharing(ps_all, p)
+  }),
+  params_sharing
+)
+
+# Print counts per origin category
+for (p in params_sharing) {
+  cat("\n── ASV sharing by '", p, "' ──\n", sep = "")
+  cnt <- sort(table(sharing_results[[p]]$origin), decreasing = TRUE)
+  print(cnt)
+}
+```
+
+```{r asv-sharing-plot, fig.width=22, fig.height=12}
+# Two rows: Filter_Mode / Pool / Omega (top) + Band_Size / Error_Model (bottom)
+p_sharing <- plot_asv_sharing_all(sharing_results)
+print(p_sharing)
+
+save_plot(p_sharing,
+          file.path(OUTPUT_DIR, "01_asv_sharing",
+                    "ASV_sharing_all_params.png"),
+          width = 22, height = 12)
+```
+
+```{r asv-sharing-tables, results='hide'}
+for (p in params_sharing) {
+  write.csv(sharing_results[[p]],
+            file.path(OUTPUT_DIR, "01_asv_sharing",
+                      paste0("ASV_sharing_", p, ".csv")),
+            row.names = FALSE)
+}
+message("ASV sharing tables saved.")
+```
+
+---
+
+# 6 · Distance Matrices
+
+> Jaccard and Aitchison distances computed on the rarefied, merged
+> phyloseq (all 96 cases, pure mocks removed).
+
+```{r compute-distances}
+# Distance matrices with disk caching
+# Set FORCE_RECOMPUTE <- TRUE to ignore cache and recalculate
+DIST_CACHE_DIR  <- file.path(OUTPUT_DIR, "distances")
+FORCE_RECOMPUTE <- FALSE
+
+dist_list   <- compute_distances_parallel(
+  ps              = ps_all,
+  cache_dir       = DIST_CACHE_DIR,
+  n_cores         = N_CORES,
+  force_recompute = FORCE_RECOMPUTE
+)
+d_jaccard   <- dist_list$Jaccard
+d_aitchison <- dist_list$Aitchison
+```
+
+---
+
+# 7 · PERMANOVA (Change E – all 6 parameters)
+
+> **Correct experimental design:** For each of the 6 parameters, all
+> other parameters are fixed at their reference level so each biological
+> sample appears exactly **once** per level of the target parameter.
+> This gives ~100 samples per test — statistically clean and fast.
+>
+> Reference levels:
+> - Pool = pseudo · Filter_Mode = Loose · Omega = O1e-200
+> - Band_Size = 32 · Error_Model = Binned
+
+```{r permanova-source-check}
+source(fn_file)
+message("Functions re-loaded: ", fn_file)
+```
+
+```{r permanova-run}
+perm_tidy <- run_permanova_by_param(
+  dist_list    = dist_list,
+  ps           = ps_all,
+  permutations = 999L,
+  ref_pool     = "pseudo",
+  ref_filter   = "Loose",
+  ref_omega    = "O1e-200",
+  ref_band     = "32",
+  ref_err      = "Binned"
+)
+
+# Split for downstream PCoA annotation
+perm_jac_tidy <- perm_tidy |> dplyr::filter(dist_method == "Jaccard")
+perm_ait_tidy <- perm_tidy |> dplyr::filter(dist_method == "Aitchison")
+
+cat("\n=== PERMANOVA results (all 6 parameters) ===\n")
+print(perm_tidy[, c("dist_method","tested_param","Term",
+                     "R2","F_stat","p_value","Significance")])
+```
+
+```{r permanova-plot, fig.width=10, fig.height=7}
+p_perm <- plot_permanova_results(perm_tidy)
+print(p_perm)
+
+save_plot(p_perm,
+          file.path(OUTPUT_DIR, "04_permanova", "PERMANOVA_results.png"),
+          width = 10, height = 7)
+
+write.csv(perm_tidy,
+          file.path(OUTPUT_DIR, "04_permanova", "PERMANOVA_all.csv"),
+          row.names = FALSE)
+```
+
+---
+
+# 8 · PCoA Ordination (Change D – 6 panels)
+
+> Two rows of three panels each:
+> Row 1: sample_type / Pool / Filter_Mode
+> Row 2: Omega / Band_Size / Error_Model
+
+## 8a · Jaccard
+
+```{r pcoa-jaccard-compute}
+message("Running PCoA – Jaccard ...")
+pcoa_jac <- run_pcoa(d_jaccard, ps_all, dist_label = "Jaccard")
+cat("Variance explained (PC1-4):",
+    paste0(attr(pcoa_jac, "pct"), "%"), "\n")
+```
+
+```{r pcoa-jaccard-6panel, fig.width=24, fig.height=12}
+p_pcoa_jac <- plot_pcoa_multi(
+  pcoa_jac, perm_df = perm_jac_tidy,
+  params = c("sample_type","Pool","Filter_Mode","Omega","Band_Size","Error_Model")
+)
+print(p_pcoa_jac)
+save_plot(p_pcoa_jac,
+          file.path(OUTPUT_DIR, "02_pcoa", "PCoA_Jaccard_6panels.png"),
+          width = 24, height = 12)
+```
+
+## 8b · Aitchison
+
+```{r pcoa-aitchison-compute}
+message("Running PCoA – Aitchison ...")
+pcoa_ait <- run_pcoa(d_aitchison, ps_all, dist_label = "Aitchison")
+cat("Variance explained (PC1-4):",
+    paste0(attr(pcoa_ait, "pct"), "%"), "\n")
+```
+
+```{r pcoa-aitchison-6panel, fig.width=24, fig.height=12}
+p_pcoa_ait <- plot_pcoa_multi(
+  pcoa_ait, perm_df = perm_ait_tidy,
+  params = c("sample_type","Pool","Filter_Mode","Omega","Band_Size","Error_Model")
+)
+print(p_pcoa_ait)
+save_plot(p_pcoa_ait,
+          file.path(OUTPUT_DIR, "02_pcoa", "PCoA_Aitchison_6panels.png"),
+          width = 24, height = 12)
+```
+
+---
+
+# 9 · Dendrogram Heatmaps (Change D – 6 annotation strips)
+
+> The dendrogram shows sample clustering by distance.
+> Annotation strips on the right now show all 6 variables:
+> sample_type · Pool · Filter · Omega · Band size · Error model.
+> PERMANOVA R² and significance are embedded in the figure title.
+
+## 9a · Jaccard
+
+```{r dendro-jaccard, fig.width=18, fig.height=13}
+ht_jac <- plot_dendrogram_heatmap(
+  dist_obj       = d_jaccard,
+  ps             = ps_all,
+  dist_label     = "Jaccard",
+  perm_df        = perm_jac_tidy,
+  cluster_method = "ward.D2"
+)
+ComplexHeatmap::draw(ht_jac,
+                     merge_legend           = TRUE,
+                     heatmap_legend_side    = "right",
+                     annotation_legend_side = "right")
+cap_jac <- attr(ht_jac, "perm_caption")
+if (!is.null(cap_jac) && nchar(cap_jac) > 0L)
+  cat("\n**PERMANOVA:**", cap_jac, "\n")
+save_heatmap(ht_jac,
+             file.path(OUTPUT_DIR, "03_dendrogram", "Dendrogram_Jaccard.png"),
+             width = 18, height = 13)
+```
+
+## 9b · Aitchison
+
+```{r dendro-aitchison, fig.width=18, fig.height=13}
+ht_ait <- plot_dendrogram_heatmap(
+  dist_obj       = d_aitchison,
+  ps             = ps_all,
+  dist_label     = "Aitchison",
+  perm_df        = perm_ait_tidy,
+  cluster_method = "ward.D2"
+)
+ComplexHeatmap::draw(ht_ait,
+                     merge_legend           = TRUE,
+                     heatmap_legend_side    = "right",
+                     annotation_legend_side = "right")
+cap_ait <- attr(ht_ait, "perm_caption")
+if (!is.null(cap_ait) && nchar(cap_ait) > 0L)
+  cat("\n**PERMANOVA:**", cap_ait, "\n")
+save_heatmap(ht_ait,
+             file.path(OUTPUT_DIR, "03_dendrogram", "Dendrogram_Aitchison.png"),
+             width = 18, height = 13)
+```
+
+---
+
+# 10 · Combined Summary Figure
+
+> Row 1: Jaccard PCoA (6 panels, 2 rows)
+> Row 2: Aitchison PCoA (6 panels, 2 rows)
+> Row 3: PERMANOVA (lollipop + p-value table) | ASV sharing
+
+```{r combined, fig.width=24, fig.height=26}
+p_combined <- (p_pcoa_jac / p_pcoa_ait / (p_perm | p_sharing)) +
+  plot_annotation(
+    title    = "Community Analysis Summary – All 96 DADA2 Cases",
+    subtitle = paste0(
+      nsamples(ps_all), " samples  |  ",
+      ntaxa(ps_all),    " ASVs  |  ",
+      length(cases),    " pipeline cases",
+      "  |  rarefied to 1 500 reads (fixed)"
+    ),
+    tag_levels = "A",
+    theme = theme(
+      plot.title    = element_text(face = "bold", size = 16, hjust = 0.5),
+      plot.subtitle = element_text(size = 11, hjust = 0.5, colour = "grey40"),
+      plot.tag      = element_text(face = "bold", size = 12)
+    )
+  )
+print(p_combined)
+save_plot(p_combined,
+          file.path(OUTPUT_DIR, "05_combined", "Community_summary.png"),
+          width = 24, height = 26)
+```
+
+---
+
+# 11 · Session Info
+
+```{r session-info}
+sessionInfo()
+```
