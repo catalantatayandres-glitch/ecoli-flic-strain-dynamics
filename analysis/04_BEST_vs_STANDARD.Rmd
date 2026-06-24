@@ -1,0 +1,702 @@
+---
+title: "04 — Best vs Standard Pipeline Comparison"
+subtitle: "Edit Distance Analysis & Integrated Dendrogram"
+author: "Andrés Catalán Tatay"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    theme: flatly
+    code_folding: hide
+    fig_width: 14
+    fig_height: 10
+---
+
+<!--
+================================================================================
+  Project : fliC Amplicon Sequencing for High-Resolution Profiling of E. coli
+            in the Infant Gut Microbiome
+  Author  : Andrés Catalán Tatay
+  Part    : Analysis — Step 04
+  Purpose : Direct comparison of the BEST pipeline (Strict filter, Binned
+            error model, FALSE pooling) against the STANDARD pipeline (Loose
+            filter, PacBio error model, FALSE pooling).
+            Covers: edit distance analysis, BLAST-based trust tier assignment,
+            integrated dendrogram, and biological group composition by ASV origin.
+  Inputs  : data/cases/                  — 96 RDS files (DADA2 outputs)
+             data/wgs/ps_wgs_EcfliC.RDS  — WGS phyloseq reference
+             data/blast/JSON/             — BLAST Single-file JSON results
+                                           (one per FASTA chunk, submitted
+                                            manually to NCBI BLAST)
+  Outputs : results/04_best_vs_standard/
+              04_all_asvs.fasta                     — full FASTA for BLAST
+              blast/blast_part_NN.fasta              — split FASTA parts
+              blast/JSON/                            — BLAST JSON files (input)
+              blast/blast_df_parsed.csv              — parsed BLAST cache
+              cached_edit_distance_matrix.rds        — edit distance cache
+              Figure1_Edit_Distance_Distribution.pdf/.png
+              Figure2_Integrated_Dendrogram.pdf/.png
+              Figure3_BioGroup_by_Origin.pdf/.png
+  Companion: 04_functions.R
+  Note    : BLAST must be run manually on NCBI before sections 6–10.
+            See section 3b for instructions.
+================================================================================
+-->
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo    = TRUE,
+  message = FALSE,
+  warning = FALSE,
+  cache   = FALSE
+)
+```
+
+---
+
+# 0. Configuration {.tabset}
+
+Edit the paths and parameters in this block before running the notebook.
+
+```{r config}
+# ── Paths ─────────────────────────────────────────────────────────────────────
+# All paths are relative to the project root.
+# Set your working directory to the project root before knitting.
+CASES_DIR <- "data/cases"
+WGS_PATH  <- "data/wgs/ps_wgs_EcfliC.RDS"
+BLAST_DIR <- "data/blast"
+OUT_DIR   <- "results/04_best_vs_standard"
+
+# BLAST JSON files must be placed in:
+#   file.path(BLAST_DIR, "JSON")  e.g. blast_part_01.json, blast_part_02.json, …
+BLAST_DIR_JSON <- file.path(BLAST_DIR, "JSON")
+
+dir.create(OUT_DIR,          showWarnings = FALSE, recursive = TRUE)
+dir.create(BLAST_DIR,        showWarnings = FALSE, recursive = TRUE)
+dir.create(BLAST_DIR_JSON,   showWarnings = FALSE, recursive = TRUE)
+
+# ── Pipeline parameters ───────────────────────────────────────────────────────
+# Best pipeline (identified in step 03)
+BEST_F      <- "Strict"      # Filtering  : maxEE = 0.5
+BEST_ERR    <- "Binned"
+BEST_POOL   <- "FALSE"
+BEST_OMEGA  <- "1e-200"
+BEST_BAND   <- "32"
+
+# Standard pipeline (default DADA2 settings)
+STD_F       <- "Loose"       # Filtering  : maxEE = 2
+STD_ERR     <- "PacBio"
+STD_POOL    <- "FALSE"
+STD_OMEGA   <- "1e-40"
+STD_BAND    <- "32"
+
+# ── Pattern helpers ───────────────────────────────────────────────────────────
+make_pattern <- function(f, err, pool, omega, band) {
+  sprintf("F-%s__Err-%s__Pool-%s__O%s__B%s", f, err, pool, omega, band)
+}
+
+BEST_PATTERN <- make_pattern(BEST_F, BEST_ERR, BEST_POOL, BEST_OMEGA, BEST_BAND)
+STD_PATTERN  <- make_pattern(STD_F,  STD_ERR,  STD_POOL,  STD_OMEGA,  STD_BAND)
+
+cat("Best pattern    :", BEST_PATTERN, "\n")
+cat("Standard pattern:", STD_PATTERN, "\n")
+```
+
+---
+
+# 1. Load Libraries & Functions
+
+```{r load-libs}
+# ── Load the companion functions file ─────────────────────────────────────────
+fn_file <- "04_functions.R"
+if (!file.exists(fn_file))
+  stop("Functions file not found: '", fn_file,
+       "'\nPlace it in the same folder as this Rmd.")
+source(fn_file)
+load_libraries()
+```
+
+---
+
+# 2. Load Input Data {.tabset}
+
+## 2a. Locate Case Files
+
+```{r locate-cases}
+all_cases <- list.files(CASES_DIR, pattern = "\\.rds$", full.names = TRUE,
+                        ignore.case = TRUE)
+cat("Total case files found:", length(all_cases), "\n")
+
+best_files <- all_cases[grepl(BEST_PATTERN, all_cases, fixed = TRUE)]
+std_files  <- all_cases[grepl(STD_PATTERN,  all_cases, fixed = TRUE)]
+
+cat("\nBest pipeline files (", length(best_files), "):\n")
+cat(basename(best_files), sep = "\n")
+
+cat("\nStandard pipeline files (", length(std_files), "):\n")
+cat(basename(std_files), sep = "\n")
+
+if (length(best_files) == 0) stop("No Best pipeline files found. Check CASES_DIR and BEST_PATTERN.")
+if (length(std_files)  == 0) stop("No Standard pipeline files found. Check CASES_DIR and STD_PATTERN.")
+```
+
+## 2b. Load Phyloseq Objects
+
+```{r load-ps}
+ps_best_list <- lapply(best_files, load_case_ps)
+ps_best      <- if (length(ps_best_list) == 1) ps_best_list[[1]] else
+                  Reduce(merge_phyloseq, ps_best_list)
+
+ps_std_list  <- lapply(std_files, load_case_ps)
+ps_std       <- if (length(ps_std_list) == 1) ps_std_list[[1]] else
+                  Reduce(merge_phyloseq, ps_std_list)
+
+cat("Best phyloseq — taxa:", ntaxa(ps_best), "| samples:", nsamples(ps_best), "\n")
+cat("Std  phyloseq — taxa:", ntaxa(ps_std),  "| samples:", nsamples(ps_std),  "\n")
+```
+
+## 2c. Load WGS Phyloseq
+
+```{r load-wgs}
+ps_wgs <- load_wgs_ps(WGS_PATH)
+cat("WGS phyloseq — taxa:", ntaxa(ps_wgs), "| samples:", nsamples(ps_wgs), "\n")
+```
+
+---
+
+# 3. Extract Sequences & Merge {.tabset}
+
+## 3a. Extract ASV Sequences
+
+```{r extract-seqs}
+seqs_best <- get_asv_sequences(ps_best)
+seqs_std  <- get_asv_sequences(ps_std)
+
+# Prefix every ASV name with its pipeline label to guarantee uniqueness
+# in the combined set and make pipeline membership unambiguous throughout.
+names(seqs_best) <- paste0("Best_",     names(seqs_best))
+names(seqs_std)  <- paste0("Standard_", names(seqs_std))
+
+# Combine — no deduplication needed because names are now unique
+seqs_all <- c(seqs_best, seqs_std)
+
+best_asvs_canonical <- names(seqs_best)   # all "Best_*" entries
+std_asvs_canonical  <- names(seqs_std)    # all "Standard_*" entries
+
+cat("ASVs in Best     :", length(seqs_best), "\n")
+cat("ASVs in Standard :", length(seqs_std),  "\n")
+cat("Total ASVs       :", length(seqs_all),  "\n")
+
+seqs_best_char <- as.character(seqs_best)
+seqs_std_char  <- as.character(seqs_std)
+n_shared <- sum(seqs_best_char %in% seqs_std_char)
+cat("Shared sequences (same seq, in both pipelines):", n_shared, "\n")
+cat("Best-only  :", sum(!seqs_best_char %in% seqs_std_char), "\n")
+cat("Standard-only:", sum(!seqs_std_char %in% seqs_best_char), "\n")
+```
+
+## 3b. Write FASTA for BLAST
+
+```{r write-fasta}
+fasta_path    <- file.path(OUT_DIR, "04_all_asvs.fasta")
+N_FASTA_PARTS <- 7
+
+# Full FASTA
+write_fasta(seqs = seqs_all, out_path = fasta_path)
+cat("Full FASTA written to:", fasta_path, "\n\n")
+
+# Split FASTA files — submit each part to NCBI BLAST web interface, then
+# download "Download All > Single-file JSON2" and save into BLAST_DIR_JSON.
+split_fasta_paths <- write_fasta(
+  seqs     = seqs_all,
+  out_path = file.path(BLAST_DIR, "blast_part.fasta"),
+  n_parts  = N_FASTA_PARTS
+)
+
+cat("\nFASTA split files created:\n")
+print(split_fasta_paths)
+
+cat("\n⚠️  Submit each FASTA part to NCBI BLAST (https://blast.ncbi.nlm.nih.gov).\n")
+cat("   Download results as: 'Download All > Single-file JSON2'\n")
+cat("   Save files into BLAST_DIR_JSON as:\n")
+for (i in seq_len(N_FASTA_PARTS)) {
+  cat(sprintf("     blast_part_%02d.fasta  ->  %s/blast_part_%02d.json\n",
+              i, BLAST_DIR_JSON, i))
+}
+cat("\nBLAST_DIR_JSON:", BLAST_DIR_JSON, "\n")
+```
+
+---
+
+# 4. Edit Distance Matrix
+
+Store the distance matrix and reuse it if present in the output folder.
+
+```{r edit-distance, cache=FALSE}
+# ── Distance matrix: load from cache or compute from scratch ──────────────────
+dm_cache_path <- file.path(OUT_DIR, "cached_edit_distance_matrix.rds")
+
+.dm_is_valid <- function(dm, expected_names) {
+  if (is.null(dm)) return(FALSE)
+  m <- tryCatch(as.matrix(dm), error = function(e) NULL)
+  if (is.null(m)) return(FALSE)
+  if (!all(expected_names %in% rownames(m))) return(FALSE)
+  off_diag <- m[row(m) != col(m)]
+  any(is.finite(off_diag))
+}
+
+force_recompute <- FALSE
+
+if (file.exists(dm_cache_path)) {
+  message(">>> Cache found — loading distance matrix from: ", dm_cache_path)
+  cache_obj <- tryCatch(readRDS(dm_cache_path), error = function(e) NULL)
+
+  if (!is.null(cache_obj) && .dm_is_valid(cache_obj$dm_bp, names(seqs_all))) {
+    seqs_aligned <- cache_obj$seqs_aligned
+    dm_bp        <- cache_obj$dm_bp
+    message(">>> Cache is valid — using cached distance matrix.")
+  } else {
+    message(">>> Cache is STALE or INVALID — deleting and recomputing ...")
+    file.remove(dm_cache_path)
+    force_recompute <- TRUE
+  }
+} else {
+  force_recompute <- TRUE
+}
+
+if (force_recompute) {
+
+  cat("\n── Sequence composition diagnostics ──────────────────────────\n")
+  cat("Best ASVs            :", length(seqs_best), "\n")
+  cat("Standard ASVs        :", length(seqs_std),  "\n")
+  cat("Total (with prefixes):", length(seqs_all),  "\n")
+
+  n_dup_best <- sum(duplicated(seqs_best_char))
+  n_dup_std  <- sum(duplicated(seqs_std_char))
+
+  cat("Duplicated seqs within Best    :", n_dup_best,
+      if (n_dup_best > 0) " <-- UNEXPECTED!" else " OK", "\n")
+  cat("Duplicated seqs within Standard:", n_dup_std,
+      if (n_dup_std > 0) " <-- UNEXPECTED!" else " OK", "\n")
+  cat("──────────────────────────────────────────────────────────────\n\n")
+
+  cat("Aligning", length(seqs_all), "sequences with DECIPHER...\n")
+  seqs_aligned <- AlignSeqs(seqs_all, verbose = FALSE)
+
+  cat("Computing edit distance matrix (pwalign Hamming)...\n")
+  if (!requireNamespace("pwalign", quietly = TRUE))
+    stop("pwalign required: BiocManager::install('pwalign')")
+  dm_bp <- as.dist(as.matrix(pwalign::stringDist(seqs_aligned, method = "hamming")))
+
+  # Validate
+  dm_mat_check <- as.matrix(dm_bp)
+  off_diag     <- dm_mat_check[row(dm_mat_check) != col(dm_mat_check)]
+
+  cat("\n── Distance matrix diagnostics ───────────────────────────────\n")
+  cat("Matrix dimensions     :", nrow(dm_mat_check), "×", ncol(dm_mat_check), "\n")
+  cat("NA cells (off-diag)   :", sum(is.na(off_diag)), "\n")
+  cat("Distance range (bp)   :", range(off_diag, na.rm = TRUE), "\n")
+  cat("──────────────────────────────────────────────────────────────\n\n")
+
+  if (all(is.na(off_diag)))
+    stop("FATAL: distance matrix is entirely NA/NaN.")
+
+  message(">>> Saving distance matrix to cache: ", dm_cache_path)
+  saveRDS(list(seqs_aligned = seqs_aligned, dm_bp = dm_bp), file = dm_cache_path)
+  message(">>> Distance matrix cached successfully.")
+}
+
+dm_mat_final   <- as.matrix(dm_bp)
+off_diag_final <- dm_mat_final[row(dm_mat_final) != col(dm_mat_final)]
+cat("Distance matrix ready. Dimensions:", nrow(dm_mat_final), "×", ncol(dm_mat_final), "\n")
+cat("Distance range (off-diagonal):",
+    range(off_diag_final, na.rm = TRUE)[1], "to",
+    range(off_diag_final, na.rm = TRUE)[2], "bp\n")
+```
+
+---
+
+# 5. FIGURE 1 — Edit Distance Distributions
+
+Three panels showing within-Best, within-Standard, and cross-pipeline edit
+distances to the closest matching sequence in each comparison group.
+
+```{r figure1, fig.width=12, fig.height=10}
+best_asvs <- intersect(best_asvs_canonical, rownames(as.matrix(dm_bp)))
+std_asvs  <- intersect(std_asvs_canonical,  rownames(as.matrix(dm_bp)))
+
+cat("Best ASVs in dm_bp     :", length(best_asvs), "\n")
+cat("Standard ASVs in dm_bp :", length(std_asvs),  "\n")
+cat("Name overlap (must = 0):", length(intersect(best_asvs, std_asvs)), "\n")
+
+if (length(best_asvs) == 0) stop("No Best ASVs in dm_bp.")
+if (length(std_asvs)  == 0) stop("No Standard ASVs in dm_bp.")
+
+p1 <- figure1_edit_dist(
+  dm_bp     = dm_bp,
+  best_asvs = best_asvs,
+  std_asvs  = std_asvs,
+  colors    = list(best  = "#4472C4",
+                   std   = "#70AD47",
+                   cross = "#ED7D31")
+)
+print(p1)
+```
+
+```{r save-figure1}
+fig1_path <- file.path(OUT_DIR, "Figure1_Edit_Distance_Distribution.pdf")
+ggsave(fig1_path, plot = p1, width = 12, height = 10, device = "pdf")
+cat("Figure 1 saved:", fig1_path, "\n")
+
+fig1_png  <- file.path(OUT_DIR, "Figure1_Edit_Distance_Distribution.png")
+ggsave(fig1_png,  plot = p1, width = 12, height = 10, dpi = 300, device = "png")
+cat("Figure 1 PNG saved:", fig1_png, "\n")
+```
+
+---
+
+# 6. BLAST Loading & LCA
+
+> ⚠️ **Run BLAST externally on the NCBI website**, then place the JSON results
+> into `data/blast/JSON/` and re-run from this section.
+>
+> **Required downloads (for each FASTA part):**
+>
+> 1. **Single-file JSON** → save as `data/blast/JSON/blast_part_NN.json`
+>    *(provides: query title, query length, accession, taxid, sciname, title,*
+>    *identity, align_len, gaps, query_from, query_to, hit_from, hit_to,*
+>    *evalue, bit_score for each HSP)*
+>
+> **query_coverage** is computed directly from the JSON coordinates:
+> `(query_to - query_from + 1) / query_len * 100`
+>
+> All 7 JSON files are read automatically from `BLAST_DIR_JSON`.
+
+```{r blast-load}
+blast_df <- NULL
+lca_df   <- NULL
+
+# ── Cache: blast_df_parsed.csv ────────────────────────────────────────────────
+# On first run, all JSON files are parsed and the result is saved as
+# blast_df_parsed.csv inside BLAST_DIR for fast re-runs.
+# Delete that CSV to force a re-parse (e.g. after updating JSON files).
+blast_cache_path <- file.path(BLAST_DIR, "blast_df_parsed.csv")
+
+if (file.exists(blast_cache_path)) {
+
+  message(">>> blast_df_parsed.csv found — loading cached BLAST results.")
+  message(">>> Path: ", blast_cache_path)
+  blast_df <- read.csv(blast_cache_path, header = TRUE,
+                       stringsAsFactors = FALSE, na.strings = c("", "NA"))
+  # Restore numeric types
+  if ("pident"      %in% colnames(blast_df)) blast_df$pident      <- as.numeric(blast_df$pident)
+  if ("query_cover" %in% colnames(blast_df)) blast_df$query_cover <- as.numeric(blast_df$query_cover)
+  if ("evalue"      %in% colnames(blast_df)) blast_df$evalue      <- as.numeric(blast_df$evalue)
+  if ("bitscore"    %in% colnames(blast_df)) blast_df$bitscore    <- as.numeric(blast_df$bitscore)
+
+  message(">>> Loaded: ", nrow(blast_df), " rows | ",
+          dplyr::n_distinct(blast_df$qseqid), " unique ASVs")
+  qcov_ok <- "query_cover" %in% colnames(blast_df) && !all(is.na(blast_df$query_cover))
+  message(">>> query_cover available: ", if (qcov_ok) "YES" else "NO (all NA)")
+
+} else {
+
+  message(">>> blast_df_parsed.csv not found — running JSON parser.")
+  message(">>> Looking for JSON files in: ", BLAST_DIR_JSON)
+
+  json_present <- dir.exists(BLAST_DIR_JSON) &&
+                  length(list.files(BLAST_DIR_JSON, pattern = "\\.json$")) > 0
+
+  if (!json_present) {
+    cat("No JSON files found in:", BLAST_DIR_JSON, "\n")
+    cat("Expected directory structure:\n")
+    cat("  ", BLAST_DIR_JSON, "/blast_part_01.json  … blast_part_NN.json\n")
+    blast_df <- NULL
+    lca_df   <- NULL
+  } else {
+    blast_df <- load_blast_results(BLAST_DIR)
+    write.csv(blast_df, blast_cache_path, row.names = FALSE)
+    message(">>> Saved blast_df_parsed.csv: ", nrow(blast_df), " rows | ",
+            ncol(blast_df), " columns")
+    message(">>> Path: ", blast_cache_path)
+  }
+}
+```
+
+```{r lca}
+# ── LCA: genus-level consensus from top BLAST hits ────────────────────────────
+# top_n hits filtered by min_pident; genus-level consensus as LCA.
+# All queries from blast_df are preserved (n_hits = 0 if none pass filter).
+if (!is.null(blast_df)) {
+  lca_df <- compute_lca(blast_df, top_n = 10, min_pident = 97)
+
+  cat("── LCA Summary ─────────────────────────────────────────────────\n")
+  cat("Columns in lca_df      :", paste(colnames(lca_df), collapse = ", "), "\n")
+  cat("ASVs in lca_df         :", nrow(lca_df), "\n")
+  cat("Missing lca_name       :", sum(is.na(lca_df$lca_name)), "\n")
+  cat("────────────────────────────────────────────────────────────────\n")
+  print(head(lca_df))
+
+} else {
+  lca_df <- data.frame(qseqid = character(), lca_name = character(),
+                       n_hits = integer(), stringsAsFactors = FALSE)
+}
+```
+
+---
+
+# 7. Trust Tier Assignment
+
+Each ASV is classified into one of five mutually exclusive tiers based on its
+BLAST hits against NCBI. A **perfect hit** is defined as 100% identity AND
+100% query coverage.
+
+- **Tier 1 — All perfect E. coli (or WGS match):** Every BLAST hit has 100% identity and 100% coverage with *Escherichia coli*, OR the ASV has an exact sequence match (edit distance = 0) to the local WGS database.
+- **Tier 2 — At least one perfect E. coli hit:** At least one BLAST hit is 100% identity + 100% coverage *E. coli*, but not all hits satisfy this criterion.
+- **Tier 3 — No perfect hits, all hits E. coli:** No perfect hits, but every BLAST hit is related to *Escherichia coli*.
+- **Tier 4 — No perfect hits, mixed taxonomy:** No perfect hits, and BLAST hits are a mixture of *E. coli* and non-*E. coli* organisms.
+- **Tier 5 — No E. coli hits:** No BLAST hit is related to *Escherichia coli*.
+
+Dendrogram grouping: **E. coli** = Tiers 1 + 2 | **Ambiguous** = Tiers 3 + 4 | **Non E. coli** = Tier 5.
+
+```{r trust-tiers}
+if (!is.null(blast_df) && nrow(lca_df) > 0) {
+
+  # ── Build base ASV data frame ──────────────────────────────────────────────
+  asv_base <- data.frame(asv = names(seqs_all), stringsAsFactors = FALSE)
+
+  # top_pident: max BLAST %identity per ASV (kept in asv_base, NOT in lca_df)
+  top_pident_df <- blast_df %>%
+    group_by(qseqid) %>%
+    summarise(top_pident = max(pident, na.rm = TRUE), .groups = "drop")
+
+  asv_base <- asv_base %>%
+    left_join(top_pident_df, by = c("asv" = "qseqid")) %>%
+    mutate(top_pident = replace_na(top_pident, 0))
+
+  # top_qcov: max query coverage per ASV
+  if ("query_cover" %in% colnames(blast_df) && !all(is.na(blast_df$query_cover))) {
+    top_qcov_df <- blast_df %>%
+      mutate(qcov_val = as.numeric(query_cover)) %>%
+      group_by(qseqid) %>%
+      summarise(top_qcov = max(qcov_val, na.rm = TRUE), .groups = "drop")
+    asv_base <- asv_base %>%
+      left_join(top_qcov_df, by = c("asv" = "qseqid")) %>%
+      mutate(top_qcov = replace_na(top_qcov, 0))
+    cat("top_qcov: range", round(min(top_qcov_df$top_qcov), 1), "–",
+        round(max(top_qcov_df$top_qcov), 1), "\n")
+  } else {
+    asv_base$top_qcov <- 0
+    cat("NOTE: query_cover not available — top_qcov = 0 for all ASVs.\n")
+  }
+
+  # ── WGS confirmation via edit distance = 0 ────────────────────────────────
+  # An ASV is "WGS confirmed" if its edit distance to any WGS sequence is 0.
+  seqs_wgs      <- get_asv_sequences(ps_wgs)
+  seqs_combined <- c(seqs_all, seqs_wgs)
+  seqs_combined <- seqs_combined[!duplicated(names(seqs_combined))]
+
+  cat("Computing WGS-confirmation distances ...\n")
+  cat("  Amplicon ASVs (prefixed):", length(seqs_all), "\n")
+  cat("  WGS ASVs                :", length(seqs_wgs), "\n")
+
+  seqs_combined_aligned <- AlignSeqs(seqs_combined, verbose = FALSE)
+  if (!requireNamespace("pwalign", quietly = TRUE))
+    stop("pwalign required: BiocManager::install('pwalign')")
+  dm_combined_bp <- as.matrix(
+    pwalign::stringDist(seqs_combined_aligned, method = "hamming")
+  )
+  rownames(dm_combined_bp) <- names(seqs_combined_aligned)
+  colnames(dm_combined_bp) <- names(seqs_combined_aligned)
+
+  amp_ids <- names(seqs_all)
+  wgs_ids <- names(seqs_wgs)
+
+  amp_ids_in <- intersect(amp_ids, rownames(dm_combined_bp))
+  wgs_ids_in <- intersect(wgs_ids, colnames(dm_combined_bp))
+
+  if (length(wgs_ids_in) == 0) {
+    warning("No WGS ASV sequences found in combined distance matrix.")
+    wgs_confirmed_asvs <- character(0)
+  } else {
+    dm_cross           <- dm_combined_bp[amp_ids_in, wgs_ids_in, drop = FALSE]
+    min_cross_dist     <- apply(dm_cross, 1, min, na.rm = TRUE)
+    wgs_confirmed_asvs <- names(min_cross_dist)[min_cross_dist == 0]
+  }
+
+  cat("  WGS-confirmed ASVs (edit dist = 0):", length(wgs_confirmed_asvs), "\n")
+  cat("  Non-confirmed ASVs               :", length(amp_ids) - length(wgs_confirmed_asvs), "\n")
+
+  asv_base <- asv_base %>%
+    mutate(wgs_confirmed = asv %in% wgs_confirmed_asvs)
+
+  # ── Input validation ───────────────────────────────────────────────────────
+  required_asv_cols <- c("asv", "top_pident", "top_qcov", "wgs_confirmed")
+  missing_asv <- setdiff(required_asv_cols, colnames(asv_base))
+  if (length(missing_asv) > 0)
+    stop("trust-tier: asv_base missing: ", paste(missing_asv, collapse = ", "))
+
+  required_lca_cols <- c("qseqid", "lca_name", "n_hits")
+  missing_lca <- setdiff(required_lca_cols, colnames(lca_df))
+  if (length(missing_lca) > 0)
+    stop("trust-tier: lca_df missing: ", paste(missing_lca, collapse = ", "))
+
+  if ("top_pident" %in% colnames(lca_df)) {
+    warning("lca_df contains 'top_pident' — removing to prevent join collision.")
+    lca_df <- dplyr::select(lca_df, -top_pident)
+  }
+
+  # ── Assign tiers ───────────────────────────────────────────────────────────
+  trust_df <- assign_trust_tiers(
+    asv_df       = asv_base,
+    wgs_ps       = ps_wgs,
+    lca_df       = lca_df,
+    blast_df     = blast_df,
+    target_genus = "Escherichia"
+  )
+
+  cat("\n── Trust Tier Distribution (5-tier system) ─────────────────────\n")
+  cat("By individual tier:\n")
+  print(table(trust_df$trust_label))
+  cat("\nBy biological group (E. coli / Ambiguous / Non E. coli):\n")
+  print(table(trust_df$trust_group))
+  cat("\nWGS-confirmed breakdown:\n")
+  print(table(WGS = trust_df$wgs_confirmed, Tier = trust_df$trust_tier))
+  cat("────────────────────────────────────────────────────────────────\n")
+
+} else {
+  trust_df <- data.frame(
+    asv           = names(seqs_all),
+    trust_label   = "Tier 5: No E. coli hits",
+    trust_tier    = 5L,
+    trust_group   = "Non E. coli",
+    wgs_confirmed = FALSE,
+    stringsAsFactors = FALSE
+  )
+  cat("No BLAST data: all ASVs assigned Tier 5 (No E. coli hits) as placeholder.\n")
+}
+```
+
+---
+
+# 8. ASV Metadata for Figure 2
+
+```{r asv-meta}
+asv_meta <- build_asv_meta(
+  ps_best        = ps_best,
+  ps_std         = ps_std,
+  trust_df       = trust_df,
+  best_asvs_can  = best_asvs_canonical,
+  std_asvs_can   = std_asvs_canonical,
+  seqs_best_char = seqs_best_char,
+  seqs_std_char  = seqs_std_char
+)
+
+cat("ASV metadata rows:", nrow(asv_meta), "\n")
+cat("Origin counts:\n");      print(table(asv_meta$origin))
+cat("Trust tier counts:\n");  print(table(asv_meta$trust_label))
+cat("Trust group counts:\n"); print(table(asv_meta$trust_group))
+```
+
+---
+
+# 9. FIGURE 2 — Integrated Dendrogram
+
+A **single, integrated figure** combining:
+
+- Hierarchical clustering dendrogram (edit-distance based, NOT phylogenetic inference)
+- Trust tier strip (5 individual tiers)
+- Biological group strip (E. coli / Ambiguous / Non E. coli)
+- Abundance heatmap (% relative abundance, sqrt-scaled)
+- Prevalence annotation
+- Sequence alignment (nucleotide level)
+- Origin annotation (Best / Standard / Shared)
+
+```{r figure2-prep}
+ps_merged <- merge_phyloseq(ps_best, ps_std)
+ps_rel    <- transform_sample_counts(ps_merged, function(x) x / sum(x))
+otu_mat   <- as(otu_table(ps_rel), "matrix")
+if (!taxa_are_rows(ps_rel)) otu_mat <- t(otu_mat)
+
+asvs_in_dm   <- rownames(as.matrix(dm_bp))
+strip_prefix <- function(x) sub("^(Best_|Standard_)", "", x)
+orig_names   <- strip_prefix(asvs_in_dm)
+
+rows_found  <- orig_names %in% rownames(otu_mat)
+otu_sub_raw <- otu_mat[orig_names[rows_found], , drop = FALSE]
+rownames(otu_sub_raw) <- asvs_in_dm[rows_found]
+
+missing_prefixed <- asvs_in_dm[!rows_found]
+if (length(missing_prefixed) > 0) {
+  zero_rows <- matrix(0, nrow = length(missing_prefixed), ncol = ncol(otu_sub_raw),
+                      dimnames = list(missing_prefixed, colnames(otu_sub_raw)))
+  otu_sub <- rbind(otu_sub_raw, zero_rows)[asvs_in_dm, , drop = FALSE]
+} else {
+  otu_sub <- otu_sub_raw[asvs_in_dm, , drop = FALSE]
+}
+
+asv_meta_sub <- asv_meta %>% filter(asv %in% asvs_in_dm)
+dm_sub       <- as.dist(as.matrix(dm_bp)[asvs_in_dm, asvs_in_dm])
+
+cat("ASVs entering Figure 2:", length(asvs_in_dm), "\n")
+```
+
+```{r figure2, fig.width=28, fig.height=20}
+p2 <- figure2_dendrogram(
+  dm_bp        = dm_sub,
+  asv_meta     = asv_meta_sub,
+  seqs_aligned = seqs_aligned[names(seqs_aligned) %in% asvs_in_dm],
+  sample_abund = otu_sub,
+  merge_dist   = 0
+)
+print(p2)
+```
+
+```{r save-figure2}
+fig2_path <- file.path(OUT_DIR, "Figure2_Integrated_Dendrogram.pdf")
+ggsave(fig2_path, plot = p2, width = 28, height = 20, device = "pdf", limitsize = FALSE)
+cat("Figure 2 saved:", fig2_path, "\n")
+
+fig2_png <- file.path(OUT_DIR, "Figure2_Integrated_Dendrogram.png")
+ggsave(fig2_png, plot = p2, width = 28, height = 20, dpi = 200, device = "png", limitsize = FALSE)
+cat("Figure 2 PNG saved:", fig2_png, "\n")
+```
+
+---
+
+# 10. FIGURE 3 — Bio Group Distribution by ASV Origin
+
+This section compares the **Bio Group composition** (*E. coli* / Ambiguous /
+Non-*E. coli*) across the three ASV categories defined by pipeline overlap:
+
+- **Shared** — ASVs present in both the Best and Standard pipelines
+- **Unique to Best** — ASVs detected only by the strict Best pipeline
+- **Unique to Standard** — ASVs detected only by the permissive Standard pipeline
+
+Each bar shows the proportion (top panel) and absolute count (bottom panel) of
+Bio Groups within each category, using the same classification from the dendrogram.
+
+```{r figure3, fig.width=9, fig.height=10}
+p3 <- figure3_biogroup_by_origin(asv_meta)
+print(p3)
+```
+
+```{r save-figure3}
+fig3_pdf <- file.path(OUT_DIR, "Figure3_BioGroup_by_Origin.pdf")
+ggsave(fig3_pdf, plot = p3, width = 9, height = 10, device = "pdf")
+cat("Figure 3 PDF saved:", fig3_pdf, "\n")
+
+fig3_png <- file.path(OUT_DIR, "Figure3_BioGroup_by_Origin.png")
+ggsave(fig3_png, plot = p3, width = 9, height = 10, dpi = 300, device = "png")
+cat("Figure 3 PNG saved:", fig3_png, "\n")
+```
+
+---
+
+# 11. Session Info
+
+```{r session-info}
+sessionInfo()
+```
