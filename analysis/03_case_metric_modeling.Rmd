@@ -1,0 +1,700 @@
+---
+title: "03 — DADA2 Parameter Benchmarking: Metric Modelling & Parameter Selection"
+author: "Andrés Catalán Tatay"
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    number_sections: true
+    theme: flatly
+    highlight: tango
+    df_print: paged
+    code_folding: show
+---
+
+<!--
+================================================================================
+  Project : fliC Amplicon Sequencing for High-Resolution Profiling of E. coli
+            in the Infant Gut Microbiome
+  Author  : Andrés Catalán Tatay
+  Part    : Analysis — Step 03
+  Purpose : Second-stage benchmarking of the DADA2 parameter grid.
+            Part 1: models the effect of each parameter on mock community
+            quality metrics (chimeric reads, ASV accuracy, read recovery).
+            Part 2: ranks all 96 parameter combinations using a composite
+            score and identifies the optimal pipeline configuration.
+  Inputs  : data/mock/mock_trimmed_4.fasta  — theoretical mock reference
+             data/cases/                    — 96 RDS files (DADA2 outputs)
+  Outputs : results/03_metric_modelling/
+              tables/         — metrics, model coefficients, marginal means,
+                                ranking tables
+              figures/        — marginal means, boxplots, coefficient plots,
+                                heatmap overview, ranking scatter and bar plots
+              model_summaries/ — plain-text model summaries per metric
+  Companion: 03_case_metric_modeling_functions.R
+================================================================================
+-->
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo      = TRUE,
+  warning   = FALSE,
+  message   = FALSE,
+  fig.width = 11,
+  fig.height= 7,
+  dpi       = 150,
+  out.width = "100%"
+)
+```
+
+---
+
+# Overview
+
+This document performs a **second-stage benchmarking analysis** of the DADA2
+parameter grid. It **does not** repeat the PERMANOVA / community-structure
+analysis from step 02. Instead, it focuses on:
+
+**PART 1 — Parameter effects on benchmark metrics**
+Using only the *mockmix* samples from all 96 cases, we compute interpretable
+quality metrics and model the effect of each DADA2 parameter.
+
+**PART 2 — Best parameter combination selection**
+We rank all 96 parameter combinations according to two biologically meaningful
+decision criteria and identify the top 3 score levels.
+
+---
+
+# Setup
+
+## Load packages
+
+```{r load-packages}
+# Core packages required — install if missing:
+# install.packages(c("ggplot2","dplyr","tidyr","vegan"))
+
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(vegan)   # required for rrarefy() used in load_all_cases()
+
+# Check that required packages are available
+required_pkgs <- c("ggplot2", "dplyr", "tidyr", "vegan")
+missing_pkgs  <- required_pkgs[!sapply(required_pkgs, requireNamespace, quietly = TRUE)]
+if (length(missing_pkgs) > 0) {
+  stop("Please install missing packages: ", paste(missing_pkgs, collapse = ", "))
+}
+
+cat("All required packages loaded.\n")
+```
+
+## Source helper functions
+
+```{r source-functions}
+# ── Load the companion functions file ─────────────────────────────────────────
+# Place 03_case_metric_modeling_functions.R in the same folder as this Rmd.
+fn_file <- "03_case_metric_modeling_functions.R"
+if (!file.exists(fn_file))
+  stop("Functions file not found: '", fn_file,
+       "'\nPlace it in the same folder as this Rmd.")
+source(fn_file)
+cat("Functions loaded from:", fn_file, "\n")
+```
+
+## Define paths
+
+```{r define-paths}
+# ── Paths ─────────────────────────────────────────────────────────────────────
+# All paths are relative to the project root.
+# Set your working directory to the project root before knitting.
+
+# INPUT
+MOCK_FASTA_PATH <- "data/mock/mock_trimmed_4.fasta"
+CASES_DIR       <- "data/cases"
+
+# OUTPUT ROOT
+OUTPUT_ROOT <- "results/03_metric_modelling"
+
+# OUTPUT SUB-DIRECTORIES
+DIR_TABLES  <- file.path(OUTPUT_ROOT, "tables")
+DIR_FIGURES <- file.path(OUTPUT_ROOT, "figures")
+DIR_MODELS  <- file.path(OUTPUT_ROOT, "model_summaries")
+
+# Create all output directories
+for (d in c(DIR_TABLES, DIR_FIGURES, DIR_MODELS)) {
+  dir.create(d, recursive = TRUE, showWarnings = FALSE)
+}
+
+cat("Output directories ready under:\n", OUTPUT_ROOT, "\n")
+```
+
+---
+
+# Load data
+
+## Load theoretical mock reference sequences
+
+```{r load-mock}
+# Parse the FASTA file. The function handles IUPAC ambiguity codes (e.g. V in
+# ESBL15) — matching is performed with full IUPAC awareness (see functions file).
+mock_seqs <- parse_fasta(MOCK_FASTA_PATH)
+
+cat("Loaded", length(mock_seqs), "theoretical mock sequences:\n")
+for (nm in names(mock_seqs)) {
+  cat(" -", nm, ":", nchar(mock_seqs[nm]), "bp")
+  ambig <- setdiff(unique(strsplit(mock_seqs[nm], "")[[1]]), c("A","C","G","T"))
+  if (length(ambig) > 0) cat("  [IUPAC ambiguities:", paste(ambig, collapse=","), "]")
+  cat("\n")
+}
+```
+
+## Load all 96 case files
+
+```{r load-cases}
+# Scans CASES_DIR for all files matching ^case_.*\.rds$
+# Files that fail to load are silently skipped with a warning.
+cases_list <- load_all_cases(CASES_DIR)
+
+cat("\nTotal cases successfully loaded:", length(cases_list), "\n")
+```
+
+---
+
+# PART 1 — Effect of parameters on benchmark metrics
+
+## Compute metrics for all cases
+
+```{r compute-metrics}
+# For each case, metrics are computed on mockmix samples only.
+# See the functions file for precise definitions of each metric.
+cat("Computing metrics for all cases...\n")
+metrics_df <- build_metrics_table(cases_list, mock_seqs)
+
+# Apply sensible factor level ordering for plotting
+metrics_df <- factorise_parameters(metrics_df)
+
+cat("\nMetrics table dimensions:", nrow(metrics_df), "rows ×", ncol(metrics_df), "cols\n")
+cat("Parameters found:\n")
+cat("  filter_mode :", paste(levels(metrics_df$filter_mode),  collapse = ", "), "\n")
+cat("  error_model :", paste(levels(metrics_df$error_model),  collapse = ", "), "\n")
+cat("  pool_mode   :", paste(levels(metrics_df$pool_mode),    collapse = ", "), "\n")
+cat("  omega_raw   :", paste(levels(metrics_df$omega_raw),    collapse = ", "), "\n")
+cat("  band_size   :", paste(levels(metrics_df$band_size),    collapse = ", "), "\n")
+```
+
+## Preview metrics table
+
+```{r preview-metrics}
+# Show all 6 metrics for the first few cases
+metrics_df |>
+  select(case_id, filter_mode, error_model, pool_mode, omega_raw, band_size,
+         pct_chimeric_reads, mean_reads_per_sample, total_asvs,
+         pct_asvs_matching_mock, pct_asvs_not_matching_mock,
+         pct_reads_matching_mock) |>
+  head(10)
+```
+
+## Save metrics table
+
+```{r save-metrics}
+save_csv(metrics_df, file.path(DIR_TABLES, "01_case_metrics.csv"))
+```
+
+## Summary statistics per metric
+
+```{r summary-stats}
+target_metrics <- c(
+  "pct_chimeric_reads",
+  "mean_reads_per_sample",
+  "total_asvs",
+  "pct_asvs_matching_mock",
+  "pct_asvs_not_matching_mock",
+  "pct_reads_matching_mock"
+)
+
+summary_stats <- do.call(rbind, lapply(target_metrics, function(m) {
+  x <- metrics_df[[m]]
+  data.frame(
+    metric = m,
+    mean   = round(mean(x, na.rm=TRUE), 3),
+    sd     = round(sd(x,   na.rm=TRUE), 3),
+    min    = round(min(x,  na.rm=TRUE), 3),
+    median = round(median(x,na.rm=TRUE),3),
+    max    = round(max(x,  na.rm=TRUE), 3),
+    n_na   = sum(is.na(x))
+  )
+}))
+
+print(summary_stats)
+save_csv(summary_stats, file.path(DIR_TABLES, "02_metric_summary_stats.csv"))
+```
+
+---
+
+## Statistical modelling
+
+We fit one regression model per metric, treating all five DADA2 parameters as
+fixed categorical predictors.
+
+**Model choices (see functions file for full rationale):**
+
+| Metric | Model | Link |
+|---|---|---|
+| % chimeric reads | Quasibinomial GLM | logit |
+| Mean reads/sample | OLS | identity (on log scale) |
+| Total ASVs | Poisson GLM | log |
+| % ASVs matching mock | Quasibinomial GLM | logit |
+
+```{r fit-models}
+cat("Fitting regression models...\n")
+models_list <- fit_all_models(metrics_df)
+
+# Print summaries to console and save to disk
+for (metric in names(models_list)) {
+  m <- models_list[[metric]]
+  if (is.null(m)) next
+  cat("\n", paste(rep("=", 60), collapse=""), "\n")
+  cat("METRIC:", metric, "\n")
+  cat("FAMILY:", m$family_used, "\n")
+  cat(paste(rep("-", 60), collapse=""), "\n")
+  print(m$summary)
+  save_model_summary(m, file.path(DIR_MODELS, paste0(metric, "_model_summary.txt")))
+}
+```
+
+## Coefficient table (all models combined)
+
+```{r coef-table}
+all_coefs <- extract_all_coefficients(models_list)
+print(all_coefs)
+save_csv(all_coefs, file.path(DIR_TABLES, "03_all_model_coefficients.csv"))
+```
+
+## Marginal means (observed group means per parameter level)
+
+```{r marginal-means}
+mm_df <- all_marginal_means(metrics_df)
+save_csv(mm_df, file.path(DIR_TABLES, "04_marginal_means.csv"))
+head(mm_df, 20)
+```
+
+---
+
+## Figures — Part 1
+
+### Figure 1: Marginal means plots (one per metric)
+
+For each metric we show the observed mean ± 95% CI across all parameter levels.
+This is the clearest way to communicate parameter effects without model
+back-transformation.
+
+```{r fig-marginal-means, fig.height=5}
+metric_labels <- c(
+  pct_chimeric_reads     = "% chimeric reads in mock (lower = better)",
+  mean_reads_per_sample  = "Mean reads per sample (mock)",
+  pct_asvs_matching_mock = "% ASVs matching theoretical mock (higher = better)",
+  total_asvs             = "Total observed ASVs in mock samples"
+)
+
+for (m in names(metric_labels)) {
+  p <- plot_marginal_means(mm_df, m, y_label = metric_labels[m])
+  print(p)
+  save_plot(p,
+            file.path(DIR_FIGURES, paste0("01_marginal_means_", m, ".png")),
+            width = 14, height = 5)
+}
+```
+
+### Figure 2: Boxplots per parameter × metric
+
+For each combination of metric and parameter, show the distribution of values
+across cases — this reveals not just the mean but the spread and any outliers.
+
+```{r fig-boxplots, fig.height=5, fig.width=8}
+params <- c("filter_mode","error_model","pool_mode","omega_raw","band_size")
+param_labels <- c(
+  filter_mode  = "Filter mode",
+  error_model  = "Error model",
+  pool_mode    = "Pooling mode",
+  omega_raw    = "Omega (ω)",
+  band_size    = "Band size"
+)
+
+for (m in names(metric_labels)) {
+  for (param in params) {
+    p <- plot_boxplot_by_param(
+      metrics_df, m, param,
+      y_label = metric_labels[m],
+      x_label = param_labels[param]
+    ) + ggplot2::ggtitle(
+      paste("Effect of", param_labels[param], "on", metric_labels[m])
+    )
+    fname <- paste0("02_boxplot_", m, "_by_", param, ".png")
+    save_plot(p, file.path(DIR_FIGURES, fname), width = 7, height = 5)
+  }
+}
+# Print one example for the report
+plot_boxplot_by_param(metrics_df, "pct_asvs_matching_mock", "filter_mode",
+                      y_label = metric_labels["pct_asvs_matching_mock"],
+                      x_label = "Filter mode") +
+  ggplot2::ggtitle("Effect of filter mode on % ASVs matching mock")
+```
+
+### Figure 3: Coefficient plots (model effect sizes)
+
+These show the direction and magnitude of each parameter effect on the link
+scale. A coefficient far from zero and whose CI does not include zero indicates
+a statistically meaningful effect.
+
+```{r fig-coefficients, fig.height=6, fig.width=9}
+for (m in names(models_list)) {
+  p <- plot_coefficient(models_list[[m]])
+  if (is.null(p)) next
+  print(p)
+  save_plot(p,
+            file.path(DIR_FIGURES, paste0("03_coef_plot_", m, ".png")),
+            width = 10, height = 6)
+}
+```
+
+### Figure 4: Combined overview — all metrics × all parameters (heatmap of marginal means)
+
+```{r fig-heatmap, fig.width=13, fig.height=7}
+# Normalise means to [0,1] within each metric for cross-metric comparison
+heatmap_df <- mm_df |>
+  filter(
+  metric %in% names(metric_labels),
+  metric != "mean_reads_per_sample"
+) |>
+  group_by(metric) |>
+  mutate(
+    norm_mean = (mean - min(mean)) / (max(mean) - min(mean) + 1e-9)
+  ) |>
+  ungroup() |>
+  mutate(
+    metric_label = metric_labels[metric],
+    param_label  = dplyr::recode(param,
+      filter_mode  = "Filter",
+      error_model  = "Error model",
+      pool_mode    = "Pool",
+      omega_raw    = "Omega (ω)",
+      band_size    = "Band size"
+    )
+  )
+
+p_heat <- ggplot2::ggplot(heatmap_df,
+       ggplot2::aes(x = param_value, y = metric_label, fill = norm_mean)) +
+  ggplot2::geom_tile(colour = "white", linewidth = 0.5) +
+  ggplot2::geom_text(ggplot2::aes(label = round(mean, 2)),
+                     size = 3.2, colour = "grey10") +
+  ggplot2::scale_fill_gradient2(
+    low = "#2166AC", mid = "#F7F7F7", high = "#D6604D",
+    midpoint = 0.5,
+    name = "Relative\nmean\n(0–1)"
+  ) +
+  ggplot2::facet_wrap(~ param_label, scales = "free_x", nrow = 1) +
+  ggplot2::labs(
+    title    = "Heatmap of parameter effects: normalised marginal means",
+    subtitle = "Values shown are raw means; colour is normalised within each metric row",
+    x        = "Parameter level",
+    y        = NULL
+  ) +
+  theme_benchmark() +
+  ggplot2::theme(
+    axis.text.y = ggplot2::element_text(size = 10),
+    axis.text.x = ggplot2::element_text(size = 9)
+  )
+
+print(p_heat)
+save_plot(p_heat, file.path(DIR_FIGURES, "04_heatmap_overview.png"),
+          width = 16, height = 6)
+```
+
+---
+
+# PART 2 — Find the best parameter combination
+
+## Composite score: rationale and calculation
+
+### Why two metrics are necessary
+
+Evaluating a DADA2 parameter combination with a single metric is insufficient,
+because the two most informative dimensions of mock-community performance
+capture fundamentally different aspects of pipeline behaviour:
+
+- **Noise** (contamination): the proportion of observed ASVs that do *not*
+  match any sequence in the theoretical mock. These are spurious sequences —
+  artefacts of denoising, chimera removal, or sequencing error — that should
+  ideally be absent. An **ASV-based** metric is appropriate here because each
+  spurious ASV represents a distinct false positive, regardless of how many
+  reads support it. A parameter combination that generates many low-abundance
+  spurious sequences would go undetected by a read-based metric, but is
+  correctly penalised by an ASV-based one.
+
+- **Recovery**: the proportion of total reads in the mock samples that are
+  assigned to ASVs which *do* match the theoretical mock. A **read-based**
+  metric is appropriate here because it reflects how completely the pipeline
+  retains the true signal in terms of sequencing depth. A parameter
+  combination that identifies the correct sequences but loses most of their
+  reads — due to excessive filtering or chimera removal — would be biologically
+  misleading and is correctly penalised by a read-based recovery metric.
+
+Neither metric alone is sufficient. A combination could achieve very low noise
+simply by being overly conservative and producing very few ASVs (discarding
+real signal in the process), or very high read recovery by being too permissive
+and retaining many reads alongside numerous spurious ASVs. Only by considering
+both simultaneously can we identify parameter combinations that are
+simultaneously clean and complete.
+
+### How the composite score is calculated
+
+For each of the 96 parameter combinations, two raw metrics are extracted from
+the mock-only subset of the data:
+
+| Symbol | Metric | Direction |
+|---|---|---|
+| $A$ | % ASVs not matching theoretical mock | lower is better |
+| $B$ | % reads from mock-matching ASVs | higher is better |
+
+Both metrics are **standardised** (z-scored) across all 96 cases to place them
+on a common, unit-free scale and remove the effect of their different ranges:
+
+$$z_A = \frac{A - \bar{A}}{\text{SD}(A)}, \qquad z_B = \frac{B - \bar{B}}{\text{SD}(B)}$$
+
+The **composite score** is then computed as:
+
+$$\text{score} = -z_A + z_B$$
+
+This formulation **penalises noise** ($-z_A$: a high noise proportion
+increases $z_A$ and subtracts from the score) and **rewards recovery**
+($+z_B$: high read recovery increases $z_B$ and adds to the score).
+Both components are weighted equally (coefficient = 1), reflecting the
+assumption that noise control and signal recovery are of equal biological
+importance. This weighting can be adjusted via the `weight_noise` and
+`weight_recovery` arguments in `rank_parameter_combinations()`.
+
+Cases are ranked in **descending order** of the composite score (rank 1 =
+best). The method is fully transparent and reproducible: every component
+is explicit, scale-free, and individually interpretable.
+
+### Tie handling
+
+Because the composite score is continuous, exact ties are possible. Rather
+than applying a hard cut-off at rank 5, the selection uses a
+**score-threshold** approach: all cases whose composite score is greater than
+or equal to the score of the nominally 5th-ranked case are retained. This
+avoids arbitrary exclusion of tied combinations.
+
+---
+
+## Compute ranking
+
+```{r compute-ranking}
+# Full ranking of all 96 cases.
+# See functions file (rank_parameter_combinations) for the complete
+# mathematical description of the composite score.
+#
+# Briefly:
+#   z_noise     = z-score of % ASVs not matching mock  (lower = better)
+#   z_recovery  = z-score of % reads matching mock     (higher = better)
+#   score       = -z_noise + z_recovery
+#   rank        = descending rank of score (rank 1 = best)
+
+ranked_df <- rank_parameter_combinations(metrics_df,
+                                          weight_noise    = 1,
+                                          weight_recovery = 1)
+
+cat("Ranking complete.\n")
+cat("Score range: [", round(min(ranked_df$composite_score), 3),
+    ",", round(max(ranked_df$composite_score), 3), "]\n\n")
+
+# Top 10 overview
+cat("Top 10 parameter combinations:\n")
+ranked_df |>
+  select(rank, case_id, filter_mode, error_model, pool_mode, omega_raw, band_size,
+         pct_asvs_not_matching_mock, pct_reads_matching_mock, composite_score) |>
+  head(10) |>
+  print()
+```
+
+## Top parameter combinations (tie-aware selection)
+
+```{r top-cases}
+# assign_rank_groups() labels every case by the 3 highest distinct score values.
+# ALL cases sharing a top-3 score receive the same group label (tie-aware).
+ranked_df  <- assign_rank_groups(ranked_df)
+top_cases  <- ranked_df[ranked_df$rank_group %in% c("1st", "2nd", "3rd"), ]
+n_selected <- nrow(top_cases)
+
+cat("\n========== TOP 3 SCORE LEVELS — PARAMETER COMBINATIONS (n =", n_selected, ") ==========\n")
+cat("Groups: 1st =", sum(top_cases$rank_group == "1st"),
+    "| 2nd =", sum(top_cases$rank_group == "2nd"),
+    "| 3rd =", sum(top_cases$rank_group == "3rd"), "\n")
+
+for (i in seq_len(nrow(top_cases))) {
+  row <- top_cases[i, ]
+  cat(sprintf(
+    "\nRank #%d: %s\n  Score: %.4f\n  %% ASVs not matching mock: %.2f%%\n  %% reads matching mock:    %.2f%%\n",
+    row$rank,
+    make_case_label(row),
+    row$composite_score,
+    row$pct_asvs_not_matching_mock,
+    row$pct_reads_matching_mock
+  ))
+}
+
+# Compact table for the report
+top_cases_table <- top_cases |>
+  select(rank, filter_mode, error_model, pool_mode, omega_raw, band_size,
+         pct_asvs_not_matching_mock, pct_reads_matching_mock,
+         z_noise, z_recovery, composite_score)
+print(top_cases_table)
+```
+
+## Save ranking tables
+
+```{r save-ranking}
+save_csv(ranked_df,  file.path(DIR_TABLES, "05_all_cases_ranked.csv"))
+save_csv(top_cases,  file.path(DIR_TABLES, "06_top_parameter_combinations.csv"))
+```
+
+---
+
+## Figures — Part 2
+
+### Figure 5: Scatter plot — two decision metrics, top cases highlighted
+
+Each point represents one of the 96 parameter combinations, positioned by its
+two decision metrics. The **ideal region is the top-left** corner: low noise
+(few spurious ASVs) combined with high recovery (most reads from real mock
+sequences). Cases belonging to the top 3 distinct composite score levels are
+highlighted; all others are shown in grey.
+Text labels are omitted from the plot interior to preserve readability —
+parameter details for highlighted cases are shown in the tables and bar plots below.
+
+```{r fig-scatter-ranking, fig.width=11, fig.height=7}
+p_scatter <- plot_ranking_scatter(ranked_df,
+               n = sum(ranked_df$rank_group %in% c("1st", "2nd", "3rd")))
+print(p_scatter)
+save_plot(p_scatter, file.path(DIR_FIGURES, "05_ranking_scatter.png"),
+          width = 12, height = 7)
+```
+
+### Figure 6: Composite score bar plot — top 3 score levels
+
+```{r fig-top-scores, fig.width=10, fig.height=5}
+p_scores <- plot_top3_scores(ranked_df)
+print(p_scores)
+save_plot(p_scores, file.path(DIR_FIGURES, "06_top3_composite_scores.png"),
+          width = 11, height = 5)
+```
+
+### Figure 7: Dual-metric bar chart — top 3 score levels (raw values)
+
+Shows the actual percentage values for both decision metrics side by side,
+making the raw performance of each top combination explicit.
+
+```{r fig-top-dual, fig.width=11, fig.height=6}
+p_dual <- plot_top_n_dual_metrics(ranked_df,
+            n = sum(ranked_df$rank_group %in% c("1st", "2nd", "3rd")))
+print(p_dual)
+save_plot(p_dual, file.path(DIR_FIGURES, "07_top3_dual_metrics.png"),
+          width = 12, height = 6)
+```
+
+### Figure 8: Full ranking — all 96 cases ordered by composite score
+
+```{r fig-full-ranking, fig.width=12, fig.height=9}
+# rank_group is already on ranked_df from the top-cases chunk.
+# Sort bars: 1st cases at top, then 2nd, then 3rd, then Other (ascending score
+# within each group so best bar sits closest to the group boundary).
+ranked_df_plot <- ranked_df[order(
+  ranked_df$rank_group,           # factor order: 1st < 2nd < 3rd < Other
+  ranked_df$composite_score       # ascending within group
+), ]
+
+ranked_df_plot$short_label <- paste0(
+  ranked_df_plot$filter_mode, "|",
+  ranked_df_plot$error_model, "|",
+  ranked_df_plot$pool_mode,   "|",
+  ranked_df_plot$omega_raw,   "|B",
+  ranked_df_plot$band_size
+)
+# Factor levels control bar order (bottom-to-top in coord_flip)
+ranked_df_plot$short_label <- factor(ranked_df_plot$short_label,
+                                      levels = ranked_df_plot$short_label)
+
+rank_colors <- c(
+  "1st"   = "#C73E1D",
+  "2nd"   = "#F4831F",
+  "3rd"   = "#F7C948",
+  "Other" = "#B0C4DE"
+)
+# Pull the stored score values from the attribute set by assign_rank_groups()
+s <- attr(ranked_df, "top3_scores")
+if (is.null(s)) s <- sort(unique(ranked_df$composite_score), decreasing = TRUE)[1:3]
+rank_labels <- c(
+  "1st"   = sprintf("1st (score = %.3f)", s[1]),
+  "2nd"   = sprintf("2nd (score = %.3f)", s[2]),
+  "3rd"   = sprintf("3rd (score = %.3f)", s[3]),
+  "Other" = "Other"
+)
+
+p_full <- ggplot2::ggplot(ranked_df_plot,
+       ggplot2::aes(x = composite_score, y = short_label, fill = rank_group)) +
+  ggplot2::geom_col(width = 0.7, alpha = 0.85) +
+  ggplot2::scale_fill_manual(
+    values = rank_colors,
+    labels = rank_labels,
+    name   = NULL
+  ) +
+  ggplot2::labs(
+    title    = "Composite score ranking — all 96 parameter combinations",
+    subtitle = "Score = \u2013z(noise) + z(recovery); higher = better | Top 3 score levels highlighted",
+    x        = "Composite score",
+    y        = "Parameter combination"
+  ) +
+  theme_benchmark() +
+  ggplot2::theme(
+    axis.text.y = ggplot2::element_text(size = 7),
+    axis.text.x = ggplot2::element_text(angle = 0, hjust = 0.5),
+    legend.position = "top"
+  )
+
+print(p_full)
+save_plot(p_full, file.path(DIR_FIGURES, "08_full_ranking_all_cases.png"),
+          width = 12, height = 16)
+```
+
+---
+
+# Session information
+
+```{r session-info}
+sessionInfo()
+```
+
+---
+
+# Appendix: Metric definitions
+
+| Metric | Definition | Computed from |
+|---|---|---|
+| `pct_chimeric_reads` | Reads assigned to chimeric ASVs / total reads in mock samples × 100 | `$bim` + `$st` (pre-removal table) |
+| `mean_reads_per_sample` | Mean of per-sample read totals across mock samples | `$st_nochim` |
+| `total_asvs` | Number of distinct ASVs with ≥ 1 read in any mock sample | `$st_nochim` |
+| `pct_asvs_matching_mock` | % of observed ASVs (in mock samples) that exactly match a theoretical mock sequence (IUPAC-aware) | `$st_nochim` + FASTA |
+| `pct_asvs_not_matching_mock` | 100 − `pct_asvs_matching_mock` (noise metric, Part 2) | derived |
+| `pct_reads_matching_mock` | % of total reads in mock samples coming from mock-matching ASVs (recovery metric, Part 2) | `$st_nochim` + FASTA |
+
+**IUPAC matching:** an ASV sequence matches a reference sequence if (a) they
+are the same length, and (b) at every position, the observed nucleotide belongs
+to the set represented by the reference IUPAC code. This correctly handles
+the single `V` (= A, C, or G) ambiguity in the ESBL15 reference sequence.
+
+**Ranking score:** composite_score = −z(noise) + z(recovery), where z-scores
+are computed across all 96 cases. A weight of 1 is applied to each component
+(symmetric weighting). To change the weighting, modify the `weight_noise` and
+`weight_recovery` arguments in `rank_parameter_combinations()`.
