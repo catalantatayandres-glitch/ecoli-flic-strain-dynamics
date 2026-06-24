@@ -1,0 +1,289 @@
+---
+title: "06 — Longitudinal E. coli ASV Carriage"
+author: "Andrés Catalán Tatay"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+    code_folding: show
+---
+
+<!--
+================================================================================
+  Project : fliC Amplicon Sequencing for High-Resolution Profiling of E. coli
+            in the Infant Gut Microbiome
+  Author  : Andrés Catalán Tatay
+  Part    : Analysis — Step 06
+  Purpose : Longitudinal E. coli ASV carriage profiling across repeated faecal
+            samples from the same individual. Compares detection patterns
+            between the BEST and STANDARD DADA2 pipelines.
+            Only ASVs with perfect BLAST support (100% identity, 100% query
+            coverage, Escherichia coli annotation) are retained.
+  Inputs  : data/cases/case_049__F-Strict__Err-Binned__Pool-FALSE__O1e-200__B32.rds
+             data/cases/case_031__F-Loose__Err-PacBio__Pool-FALSE__O1e-40__B32.rds
+             data/wgs/phyloseq_NCBInt_process_all_sub_OMEGA_A-200_poolFALSE_minQ30EE05.RDS
+             results/04_best_vs_standard/blast/blast_df_parsed.csv
+  Outputs : results/06_longitudinal_carriage/
+              longitudinal_carriage_<subject>_<pipeline>.png/.pdf
+              06_carriage_df.csv
+              06_carriage_summary.csv
+  Companion: 06_Longitudinal_Carriage_functions.R
+  Note    : Requires BLAST results from step 04 to be completed first.
+================================================================================
+-->
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo    = TRUE,
+  message = TRUE,
+  warning = TRUE,
+  fig.width  = 10,
+  fig.height = 6
+)
+```
+
+---
+
+## Conceptual background
+
+This analysis evaluates whether *E. coli* ASVs inferred by *fliC* PacBio amplicon
+sequencing show longitudinal carriage patterns across repeated samples from the same
+individual.
+
+By comparing the **BEST** and **STANDARD** DADA2 pipelines, the analysis assesses
+whether pipeline choice affects the detection and persistence of *E. coli* ASVs over
+time.
+
+Only ASVs with **perfect BLAST support** for *Escherichia coli* are retained:
+
+- 100% identity (`pident == 100`)
+- 100% query coverage (`query_cover == 100`)
+- *Escherichia coli* annotation in the BLAST `sscinames` field
+
+Each plot shows **filled circles only**, sized by relative abundance at that timepoint.
+Only timepoints with a true detection (Abundance > 0) are plotted — absent timepoints
+leave an empty space on the x-axis.
+
+---
+
+## 1. Setup
+
+### 1.1 Libraries
+
+```{r libraries}
+library(tidyverse)
+library(phyloseq)
+library(ggplot2)
+```
+
+### 1.2 Source helper functions
+
+```{r source-functions}
+# ── Load the companion functions file ─────────────────────────────────────────
+fn_file <- "06_Longitudinal_Carriage_functions.R"
+if (!file.exists(fn_file))
+  stop("Functions file not found: '", fn_file,
+       "'\nPlace it in the same folder as this Rmd.")
+source(fn_file)
+```
+
+---
+
+## 2. Paths
+
+```{r paths}
+# ── Paths ─────────────────────────────────────────────────────────────────────
+# All paths are relative to the project root.
+# Set your working directory to the project root before knitting.
+
+cases_dir <- "data/cases"
+
+case_path_BEST <- file.path(
+  cases_dir,
+  "case_049__F-Strict__Err-Binned__Pool-FALSE__O1e-200__B32.rds"
+)
+
+case_path_STANDARD <- file.path(
+  cases_dir,
+  "case_031__F-Loose__Err-PacBio__Pool-FALSE__O1e-40__B32.rds"
+)
+
+# Longitudinal metadata source (saved with save(), not saveRDS())
+florentin_phyloseq_path <-
+  "data/wgs/phyloseq_NCBInt_process_all_sub_OMEGA_A-200_poolFALSE_minQ30EE05.RDS"
+
+# BLAST results from step 04
+blast_file <-
+  "results/04_best_vs_standard/blast/blast_df_parsed.csv"
+
+output_dir <- "results/06_longitudinal_carriage"
+
+dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+```
+
+---
+
+## 3. Load data
+
+### 3.1 BEST and STANDARD phyloseq objects
+
+```{r load-cases}
+message("Loading BEST case...")
+ps_best_raw <- load_case_phyloseq(case_path_BEST)
+
+message("Loading STANDARD case...")
+ps_standard_raw <- load_case_phyloseq(case_path_STANDARD)
+
+cat("BEST     — taxa:", ntaxa(ps_best_raw),     "| samples:", nsamples(ps_best_raw),     "\n")
+cat("STANDARD — taxa:", ntaxa(ps_standard_raw), "| samples:", nsamples(ps_standard_raw), "\n")
+```
+
+### 3.2 Longitudinal metadata source
+
+```{r load-florentin}
+message("Loading longitudinal metadata phyloseq (via load())...")
+ps_florentin <- load_florentin_phyloseq(florentin_phyloseq_path)
+cat("Metadata source — taxa:", ntaxa(ps_florentin), "| samples:", nsamples(ps_florentin), "\n")
+```
+
+---
+
+## 4. Attach longitudinal metadata
+
+```{r attach-metadata}
+meta_cols <- c("Subject", "days_since_baseline", "weeks_since_baseline",
+               "Type", "Type2", "n_sample", "Time")
+
+message("\nAttaching metadata to BEST...")
+ps_best <- attach_longitudinal_metadata(ps_best_raw, ps_florentin, meta_cols)
+
+message("\nAttaching metadata to STANDARD...")
+ps_standard <- attach_longitudinal_metadata(ps_standard_raw, ps_florentin, meta_cols)
+```
+
+---
+
+## 5. Filter to individual samples only
+
+```{r filter-individual}
+message("\nFiltering BEST to individual samples...")
+ps_best <- filter_individual_samples(ps_best)
+
+message("\nFiltering STANDARD to individual samples...")
+ps_standard <- filter_individual_samples(ps_standard)
+
+cat("\nAfter filtering:\n")
+cat("  BEST     — samples:", nsamples(ps_best),     "\n")
+cat("  STANDARD — samples:", nsamples(ps_standard), "\n")
+```
+
+---
+
+## 6. Parse BLAST results and define E. coli ASVs
+
+```{r parse-blast}
+message("\nParsing BLAST file...")
+ecoli_asvs <- parse_ecoli_asvs(blast_file)
+
+ecoli_asvs %>%
+  count(Pipeline) %>%
+  knitr::kable(caption = "E. coli ASV counts by pipeline (perfect BLAST hits only)")
+```
+
+---
+
+## 7. Determine subjects
+
+```{r get-subjects}
+subjects_best <- as(sample_data(ps_best), "data.frame") %>%
+  filter(!is.na(Subject)) %>%
+  distinct(Subject) %>%
+  pull(Subject) %>%
+  as.character()
+
+subjects_standard <- as(sample_data(ps_standard), "data.frame") %>%
+  filter(!is.na(Subject)) %>%
+  distinct(Subject) %>%
+  pull(Subject) %>%
+  as.character()
+
+subjects <- union(subjects_best, subjects_standard)
+cat("Subjects to analyse:", paste(subjects, collapse = ", "), "\n")
+```
+
+---
+
+## 8. Run longitudinal carriage analysis
+
+```{r run-analysis}
+results <- run_longitudinal_carriage(
+  ps_best      = ps_best,
+  ps_standard  = ps_standard,
+  ecoli_asvs   = ecoli_asvs,
+  subjects     = subjects,
+  output_dir   = output_dir,
+  group_by     = "days_since_baseline",
+
+  # Abundance size mapping
+  abund_breaks = c(-Inf, 0.5, 1, 2, 5, Inf),
+  abund_labels = c("< 0.5%", "0.5-1%", "1-2%", "2-5%", "> 5%"),
+  abund_sizes  = c("< 0.5%" = 1.0, "0.5-1%" = 2.5,
+                   "1-2%"   = 4.0, "2-5%"   = 6.0, "> 5%" = 8.0),
+
+  # All prevalence thresholds = 0 (keep all E. coli ASVs)
+  prev_high_cutoff    = 0,
+  prev_high_min_ab    = 0,
+  prev_med_cutoff     = 0,
+  prev_med_min_ab     = 0,
+  prev_low_min_ab     = 0,
+  min_subject_samples = 0,
+  peak_trust_abund    = 0,
+
+  fig_width  = 10,
+  fig_height = 6
+)
+```
+
+---
+
+## 9. Display plots
+
+```{r display-plots, results='asis', fig.width=10, fig.height=6}
+for (plot_name in names(results$individual_plots)) {
+  cat("\n\n### ", gsub("_", " — ", plot_name), "\n\n")
+  print(results$individual_plots[[plot_name]])
+}
+```
+
+---
+
+## 10. Carriage dataframe
+
+```{r carriage-df}
+# Master long-format dataframe of all detections across subjects and pipelines.
+# Saved automatically to output_dir as 06_carriage_df.csv.
+results$carriage_df %>%
+  head(20) %>%
+  knitr::kable(caption = "First 20 rows of the carriage dataframe")
+```
+
+---
+
+## 11. Summary table
+
+```{r summary-table}
+knitr::kable(
+  results$summary_df,
+  caption = "E. coli ASV carriage summary per Subject and Pipeline"
+)
+```
+
+---
+
+## 12. Session info
+
+```{r session-info}
+sessionInfo()
+```
