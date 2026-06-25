@@ -19,7 +19,7 @@
 
 **Solution:** culture-independent amplicon sequencing of the *fliC* (flagellin) gene with PacBio long reads. *fliC* has conserved primer sites flanking a hypervariable central region (~700–1700 bp) that accumulates strain-specific mutations. PacBio CCS is required because the amplicon is too long for short-read platforms.
 
-Raw reads are processed by **DADA2**, whose tuneable parameters had never been systematically evaluated for long-read *fliC* data. This is the central aim of this work.
+Raw reads from longitudinal samples of the childcare cohort (subsampled to 3 individuals) are processed by **DADA2**, whose tuneable parameters had never been systematically evaluated for long-read *fliC* data. This is the central aim of this work.
 
 ---
 
