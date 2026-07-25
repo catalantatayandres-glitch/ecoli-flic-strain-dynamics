@@ -29,7 +29,7 @@ Raw reads from longitudinal samples of the childcare cohort (subsampled to 3 ind
 2. **Mock community** of 4 known *E. coli fliC* sequences used as ground truth
 3. **Optimal pipeline** identified via composite score (noise vs. recovery trade-off)
 4. **Best vs. Standard** pipeline compared at sequence, taxonomic, and biological level
-5. **Longitudinal carriage** of *E. coli* ASVs profiled in 3 individuals from a childcare cohort
+5. **Longitudinal carriage** of *E. coli* ASVs profiled in 3 individuals from a childcare cohort based in Zurich
 
 ---
 
