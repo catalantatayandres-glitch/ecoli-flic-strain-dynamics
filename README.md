@@ -179,4 +179,4 @@ rmarkdown::render("analysis/06_longitudinal_carriage/Scripts/06_Longitudinal_Car
 ## Contact
 
 Open an issue for questions about the code or data.  
-**Andrés Catalán Tatay** — University of Lausanne, Computational Biology Department
+**Andrés Catalán Tatay** — University of Lausanne
