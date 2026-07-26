@@ -7,8 +7,8 @@ parameter choice shapes the detected ASV community.
 
 | File | Description |
 |------|-------------|
-| `02_community_analyses.Rmd` | Main analysis notebook |
-| `02_community_analyses_functions.R` | Companion functions |
+| `Scripts/02_community_analyses.Rmd` | Main analysis notebook |
+| `Scripts/02_community_analyses_functions.R` | Companion functions |
 
 ---
 
@@ -26,7 +26,7 @@ parameter choice shapes the detected ASV community.
 source start_env.sh
 ```
 ```r
-rmarkdown::render("analysis/02_community_analyses/02_community_analyses.Rmd")
+rmarkdown::render("analysis/02_community_analyses/Scripts/02_community_analyses.Rmd")
 ```
 
 > Distance matrices are cached on first run. Set `FORCE_RECOMPUTE <- TRUE` to recompute.  
@@ -44,7 +44,7 @@ is used) or **unique** (only appearing under one specific level). This first ana
 establishes which parameters drive the most change in the detected ASV set — without
 yet determining whether those changes reflect true biology or noise.
 
-![ASV sharing](Results/ASV_sharing_all_params.png)
+![ASV sharing](Figures/ASV_sharing_all_params.png)
 
 **Key findings:**
 - A clear hierarchy of parameter influence emerges
@@ -70,7 +70,7 @@ Crucially, sample type (Individual / Positive / Negative) is included as a
 variable so that pipeline effects can be directly compared against the true
 biological signal.
 
-![PERMANOVA results](Results/PERMANOVA_results.png)
+![PERMANOVA results](Figures/PERMANOVA_results.png)
 
 **Key findings:**
 - **Sample type** is the strongest driver of community structure (R²= 0.115 Aitchison, R²= 0.076 Jaccard, both p = 0.001) — true biological differences dominate over any pipeline-driven effects
@@ -90,8 +90,8 @@ to see which samples cluster together and which separate — and therefore which
 variables (biological or technical) are most responsible for structuring the data.
 Six panels are produced per distance metric, one for each variable of interest.
 
-![PCoA Aitchison](Results/PCoA_Aitchison_6panels.png)
-![PCoA Jaccard](Results/PCoA_Jaccard_6panels.png)
+![PCoA Aitchison](Figures/PCoA_Aitchison_6panels.png)
+![PCoA Jaccard](Figures/PCoA_Jaccard_6panels.png)
 
 **Key findings:**
 - Under **Aitchison distance** (PC1 = 14.6%, PC2 = 8.3%), individuals, positive controls, and negative controls separate clearly — biology drives community structure more than pipeline choice
@@ -102,4 +102,4 @@ Six panels are produced per distance metric, one for each variable of interest.
 
 ---
 
-*Full methods in `02_community_analyses.Rmd` and the project report.*
+*Full methods in `Scripts/02_community_analyses.Rmd` and the project report.*
