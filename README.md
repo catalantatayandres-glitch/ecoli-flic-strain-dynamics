@@ -58,9 +58,7 @@ ecoli-flic-strain-dynamics/
 │   ├── sample_selection/          ← subsample to 10k reads/sample; select cohort samples
 │   ├── primer_trimming/           ← cutadapt primer removal
 │   └── dada2/                     ← run DADA2 across all 96 parameter combinations
-│       ├── dada2_script.R
-│       └── run_dada2_script.sh
-│
+│            
 └── analysis/                      ← Part 2 · local
     ├── 02_community_analyses/     ← ASV sharing · PERMANOVA · PCoA · dendrograms
     ├── 03_metric_modelling/       ← quality metrics · GLMs · composite score ranking
