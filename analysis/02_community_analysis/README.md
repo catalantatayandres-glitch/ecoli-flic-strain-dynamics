@@ -44,7 +44,7 @@ is used) or **unique** (only appearing under one specific level). This first ana
 establishes which parameters drive the most change in the detected ASV set — without
 yet determining whether those changes reflect true biology or noise.
 
-![ASV sharing](results/ASV_sharing_all_params.png)
+![ASV sharing](Results/ASV_sharing_all_params.png)
 
 **Key findings:**
 - A clear hierarchy of parameter influence emerges
@@ -70,7 +70,7 @@ Crucially, sample type (Individual / Positive / Negative) is included as a
 variable so that pipeline effects can be directly compared against the true
 biological signal.
 
-![PERMANOVA results](results/PERMANOVA_results.png)
+![PERMANOVA results](Results/PERMANOVA_results.png)
 
 **Key findings:**
 - **Sample type** is the strongest driver of community structure (R²= 0.115 Aitchison, R²= 0.076 Jaccard, both p = 0.001) — true biological differences dominate over any pipeline-driven effects
@@ -90,8 +90,8 @@ to see which samples cluster together and which separate — and therefore which
 variables (biological or technical) are most responsible for structuring the data.
 Six panels are produced per distance metric, one for each variable of interest.
 
-![PCoA Aitchison](results/PCoA_Aitchison_6panels.png)
-![PCoA Jaccard](results/PCoA_Jaccard_6panels.png)
+![PCoA Aitchison](Results/PCoA_Aitchison_6panels.png)
+![PCoA Jaccard](Results/PCoA_Jaccard_6panels.png)
 
 **Key findings:**
 - Under **Aitchison distance** (PC1 = 14.6%, PC2 = 8.3%), individuals, positive controls, and negative controls separate clearly — biology drives community structure more than pipeline choice
