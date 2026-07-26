@@ -1,4 +1,4 @@
-# *fliC* Amplicon Sequencing — *E. coli* Strain Profiling in the Infant Gut
+# High-Resolution *E. coli* Strain Profiling from Faecal DNA: Benchmarking Long-Read *fliC* Amplicon Sequencing
 
 > **Benchmarking DADA2 parameters for long-read *fliC* amplicon sequencing and applying the validated pipeline to longitudinal *E. coli* carriage profiling in a childcare cohort.**
 
@@ -19,7 +19,7 @@
 
 **Solution:** culture-independent amplicon sequencing of the *fliC* (flagellin) gene with PacBio long reads. *fliC* has conserved primer sites flanking a hypervariable central region (~700–1700 bp) that accumulates strain-specific mutations. PacBio CCS is required because the amplicon is too long for short-read platforms.
 
-Raw reads from longitudinal samples of the childcare cohort (subsampled to 3 individuals) are processed by **DADA2**, whose tuneable parameters had never been systematically evaluated for long-read *fliC* data. This is the central aim of this work.
+Raw reads are processed by **DADA2**, whose tuneable parameters had never been systematically evaluated for long-read *fliC* data. This is the central aim of this work.
 
 ---
 
@@ -29,7 +29,7 @@ Raw reads from longitudinal samples of the childcare cohort (subsampled to 3 ind
 2. **Mock community** of 4 known *E. coli fliC* sequences used as ground truth
 3. **Optimal pipeline** identified via composite score (noise vs. recovery trade-off)
 4. **Best vs. Standard** pipeline compared at sequence, taxonomic, and biological level
-5. **Longitudinal carriage** of *E. coli* ASVs profiled in 3 individuals from a childcare cohort based in Zurich
+5. **Longitudinal carriage** of *E. coli* ASVs profiled in 3 individuals from a childcare cohort
 
 ---
 
@@ -50,25 +50,37 @@ Raw reads from longitudinal samples of the childcare cohort (subsampled to 3 ind
 ecoli-flic-strain-dynamics/
 │
 ├── README.md
-├── dependencies/                 
-│   ├── env_dada2_final.yml        ← conda environment
-│   ├── start_env.sh               ← environment activation
+│
+├── dependencies/                  ← environment files
+│   ├── env_dada2_final.yml        ← conda environment specification
+│   ├── start_env.sh               ← environment activation script
 │   └── .gitignore
 │
-├── pipeline/                  ← Part 1 · HPC cluster (UNIL)
-│   ├── sample_selection/      ← subsample to 10k reads/sample; select cohort samples
-│   ├── primer_trimming/       ← cutadapt primer removal
-│   └── dada2/                 ← run DADA2 across all 96 parameter combinations
+├── pipeline/                      ← Part 1 · HPC cluster (UNIL)
+│   ├── sample_selection/          ← subsample to 10k reads/sample; select cohort samples
+│   ├── primer_trimming/           ← cutadapt primer removal
+│   ├── dada2/                     ← run DADA2 across all 96 parameter combinations
+│   │   ├── dada2_script.R
+│   │   └── run_dada2_script.sh
+│   └── README.md
 │
-└── analysis/                  ← Part 2 · local
-    ├── 02_community_analyses/ ← ASV sharing · PERMANOVA · PCoA · dendrograms
-    ├── 03_metric_modelling/   ← quality metrics · GLMs · composite score ranking
-    ├── 04_best_vs_standard/   ← edit distances · BLAST taxonomy · bio group plots
-    ├── 05_mock_qc/            ← Bray-Curtis similarity vs theoretical mock
-    └── 06_longitudinal_carriage/ ← E. coli carriage bubble plots per subject
+└── analysis/                      ← Part 2 · local
+    ├── 02_community_analyses/     ← ASV sharing · PERMANOVA · PCoA · dendrograms
+    ├── 03_metric_modelling/       ← quality metrics · GLMs · composite score ranking
+    ├── 04_best_vs_standard/       ← edit distances · BLAST taxonomy · bio group plots
+    ├── 05_mock_qc/                ← Bray-Curtis similarity vs theoretical mock
+    └── 06_longitudinal_carriage/  ← E. coli carriage bubble plots per subject
 ```
 
-> Each `analysis/` subfolder has its own `README.md` with inputs, outputs, and run instructions.
+Each folder in `analysis/` contains:
+```
+0X_step_name/
+├── README.md       ← methods, how to run, and results with figures
+├── Scripts/        ← .Rmd and companion .R functions file
+└── Figures/        ← key output figures
+```
+
+> Each `analysis/` subfolder has its own `README.md` with full methods, results, and figures.
 
 ---
 
@@ -122,8 +134,8 @@ data/
 
 ```bash
 # Create and activate the conda environment
-conda env create -f env_dada2_final.yml
-source start_env.sh
+conda env create -f dependencies/env_dada2_final.yml
+source dependencies/start_env.sh
 ```
 
 Key dependencies:
@@ -151,11 +163,11 @@ Key dependencies:
 ```
 
 ```r
-rmarkdown::render("analysis/02_community_analyses/02_community_analyses.Rmd")
-rmarkdown::render("analysis/03_metric_modelling/03_case_metric_modeling.Rmd")
-rmarkdown::render("analysis/04_best_vs_standard/04_BEST_vs_STANDARD.Rmd")
-rmarkdown::render("analysis/05_mock_qc/05_Mock_Distributions.Rmd")
-rmarkdown::render("analysis/06_longitudinal_carriage/06_Longitudinal_Carriage.Rmd")
+rmarkdown::render("analysis/02_community_analyses/Scripts/02_community_analyses.Rmd")
+rmarkdown::render("analysis/03_metric_modelling/Scripts/03_case_metric_modeling.Rmd")
+rmarkdown::render("analysis/04_best_vs_standard/Scripts/04_BEST_vs_STANDARD.Rmd")
+rmarkdown::render("analysis/05_mock_qc/Scripts/05_Mock_Distributions.Rmd")
+rmarkdown::render("analysis/06_longitudinal_carriage/Scripts/06_Longitudinal_Carriage.Rmd")
 ```
 
 > ⚠️ **Step 04 has a manual BLAST step.** Generate FASTA files in section 3b, submit to [NCBI BLAST](https://blast.ncbi.nlm.nih.gov), download results as *Single-file JSON2*, and place in `data/blast/JSON/`. See `analysis/04_best_vs_standard/README.md`.
@@ -167,4 +179,4 @@ rmarkdown::render("analysis/06_longitudinal_carriage/06_Longitudinal_Carriage.Rm
 ## Contact
 
 Open an issue for questions about the code or data.  
-**Andrés Catalán Tatay** — University of Lausanne
+**Andrés Catalán Tatay** — University of Lausanne, Computational Biology Department
