@@ -1,94 +1,105 @@
 # 02 — Community Analyses
 
-Community-level analysis of all 96 DADA2 pipeline parameter combinations,
-assessing how parameter choice shapes the detected ASV community through
-ASV sharing analysis, distance matrices, PERMANOVA, and PCoA ordination.
+Community-level analysis of all 96 DADA2 parameter combinations, assessing how
+parameter choice shapes the detected ASV community.
 
 ## Contents
 
 | File | Description |
 |------|-------------|
-| `02_community_analyses.Rmd` | Main analysis notebook — knit to reproduce all results |
-| `02_community_analyses_functions.R` | Companion functions sourced by the Rmd |
+| `02_community_analyses.Rmd` | Main analysis notebook |
+| `02_community_analyses_functions.R` | Companion functions |
+
+---
 
 ## What this analysis does
 
-1. **Loads all 96 DADA2 output cases** (2 filter × 3 pool × 4 omega × 2 band × 2 error model)
-2. **Removes pure mock controls** (`S_KPC`, `S_OXA`, `S_E15`, `S_E25`) — only MOCKMIX community standards are kept as positive controls
-3. **Rarefies** all samples to a fixed depth of 1 500 reads
-4. **ASV sharing analysis** — classifies ASVs as shared across or unique to each parameter level
-5. **Distance matrices** — computes Jaccard (presence/absence) and Aitchison (CLR-Euclidean) distances with disk caching
-6. **PERMANOVA** — tests each of the 6 parameters independently using focused subsamples (999 permutations)
-7. **PCoA ordination** — 6-panel plots for both distance metrics
-8. **Dendrogram heatmaps** — hierarchical clustering with annotation strips for all parameters
-
-## Inputs
-
-```
-data/
-└── cases/
-    ├── case_001__F-Strict__Err-Binned__Pool-FALSE__O1e-200__B32.rds
-    ├── case_002__F-Strict__Err-Binned__Pool-FALSE__O1e-200__B64.rds
-    └── ...   (96 RDS files total)
-```
-
-Each RDS file contains a `phyloseq` object output by the DADA2 pipeline (see `pipeline/dada2/`).
-
-## Outputs
-
-```
-results/
-└── 02_community_analyses/
-    ├── 01_asv_sharing/
-    │   ├── ASV_sharing_all_params.png
-    │   ├── ASV_sharing_Filter_Mode.csv
-    │   ├── ASV_sharing_Pool.csv
-    │   ├── ASV_sharing_Omega.csv
-    │   ├── ASV_sharing_Band_Size.csv
-    │   └── ASV_sharing_Error_Model.csv
-    ├── 02_pcoa/
-    │   ├── PCoA_Jaccard_6panels.png
-    │   └── PCoA_Aitchison_6panels.png
-    ├── 03_dendrogram/
-    │   ├── Dendrogram_Jaccard.png
-    │   └── Dendrogram_Aitchison.png
-    ├── 04_permanova/
-    │   ├── PERMANOVA_results.png
-    │   └── PERMANOVA_all.csv
-    ├── 05_combined/
-    │   └── Community_summary.png
-    └── distances/
-        ├── dist_Jaccard.rds   (cached)
-        └── dist_Aitchison.rds (cached)
-```
+1. Loads all 96 DADA2 output cases; removes pure mock controls; rarefies to 1 500 reads/sample
+2. **ASV sharing analysis** — classifies ASVs as shared across or unique to each parameter level
+3. **Distance matrices** — Jaccard (presence/absence) and Aitchison (CLR-Euclidean), cached to disk
+4. **PERMANOVA** — tests each of the 6 parameters independently (999 permutations)
+5. **PCoA ordination** — 6-panel plots for both distance metrics
 
 ## How to run
 
-1. Set your R working directory to the **project root**
-2. Ensure the conda environment is active:
-   ```bash
-   source start_env.sh
-   ```
-3. Open `02_community_analyses.Rmd` in RStudio and click **Knit**, or run from the terminal:
-   ```r
-   rmarkdown::render("analysis/02_community_analyses/02_community_analyses.Rmd")
-   ```
+```bash
+source start_env.sh
+```
+```r
+rmarkdown::render("analysis/02_community_analyses/02_community_analyses.Rmd")
+```
 
-## Dependencies
+> Distance matrices are cached on first run. Set `FORCE_RECOMPUTE <- TRUE` to recompute.  
+> Windows users: parallel loading is automatically disabled.
 
-Managed via `env_dada2_final.yml`. Key packages:
+---
 
-| Package | Source |
-|---------|--------|
-| `phyloseq` | Bioconductor |
-| `ComplexHeatmap` | Bioconductor |
-| `vegan` | CRAN |
-| `ape` | CRAN |
-| `ggplot2` | CRAN |
-| `patchwork` | CRAN |
+## Results
 
-## Notes
+### ASV sharing
 
-- Distance matrices are cached to `results/02_community_analyses/distances/` on first run. Set `FORCE_RECOMPUTE <- TRUE` in the `compute-distances` chunk to recompute from scratch.
-- Windows users: parallel loading is automatically disabled (`N_CORES = 1`).
-- This step must be run before `03_metric_modelling/`, which uses the same 96 case outputs.
+For each of the five DADA2 parameters, every ASV detected across all 96 cases is
+classified as either **shared** (present regardless of which level of that parameter
+is used) or **unique** (only appearing under one specific level). This first analysis
+establishes which parameters drive the most change in the detected ASV set — without
+yet determining whether those changes reflect true biology or noise.
+
+![ASV sharing](results/ASV_sharing_all_params.png)
+
+**Key findings:**
+- A clear hierarchy of parameter influence emerges
+- **Pooling strategy** dominates: 90.1% of ASVs are unique to the `TRUE` pooling level — full pooling drives detection of a large number of sequences not recovered under any other strategy
+- **Filter mode** shows a strong effect: 67% of ASVs are unique to the `Loose` setting, indicating that relaxing quality thresholds substantially inflates the detected ASV set
+- **Omega** has a moderate-to-strong effect: 26.9% of ASVs are unique to the least stringent threshold (1e-40)
+- **Error model** shows only moderate influence: PacBio produces 19.5% unique ASVs vs. Binned
+- **Band size** has no detectable influence: 100% of ASVs are shared across both levels
+
+> A high proportion of unique ASVs at a given level does not confirm whether those sequences represent true biology or noise — this requires the analyses below.
+
+---
+
+### PERMANOVA
+
+To formally test whether the differences seen in ASV sharing are statistically
+significant, a Permutational Multivariate Analysis of Variance (PERMANOVA) is
+performed on two distance matrices — Jaccard and Aitchison — computed from the
+merged phyloseq of all 96 cases. Each parameter is tested independently in a
+focused subsample where all other parameters are fixed at a reference level,
+allowing its individual contribution to community variance to be isolated.
+Crucially, sample type (Individual / Positive / Negative) is included as a
+variable so that pipeline effects can be directly compared against the true
+biological signal.
+
+![PERMANOVA results](results/PERMANOVA_results.png)
+
+**Key findings:**
+- **Sample type** is the strongest driver of community structure (R²= 0.115 Aitchison, R²= 0.076 Jaccard, both p = 0.001) — true biological differences dominate over any pipeline-driven effects
+- **Pooling strategy** is the only pipeline parameter with a strong and significant effect under both distance metrics
+- Critically, the pooling effect is much stronger under **Jaccard** (R²= 0.084) than **Aitchison** (R²= 0.015). Since Jaccard is presence/absence-based and Aitchison is abundance-weighted, this discrepancy raises the possibility that the extra sequences introduced by `TRUE` pooling are predominantly low-abundance and may not represent genuine biological variants
+- **Filter mode** reaches significance only under Jaccard (R²= 0.009, p = 0.014), consistent with the same pattern
+- **Omega, error model, and band size** show no significant effect under either metric
+
+---
+
+### PCoA ordination
+
+To visually explore the patterns driving the variance quantified by PERMANOVA,
+Principal Coordinates Analysis (PCoA) is applied to both distance matrices. PCoA
+projects sample dissimilarities into a low-dimensional space, making it possible
+to see which samples cluster together and which separate — and therefore which
+variables (biological or technical) are most responsible for structuring the data.
+Six panels are produced per distance metric, one for each variable of interest.
+
+![PCoA Aitchison](results/PCoA_Aitchison_6panels.png)
+![PCoA Jaccard](results/PCoA_Jaccard_6panels.png)
+
+**Key findings:**
+- Under **Aitchison distance** (PC1 = 14.6%, PC2 = 8.3%), individuals, positive controls, and negative controls separate clearly — biology drives community structure more than pipeline choice
+- `TRUE` pooling samples form a distinct trajectory along PC1 across all sample types, consistent with the possibility that full pooling introduces sequences shared across samples regardless of their true biological composition
+- Under **Jaccard distance** (PC1 = 0.6%, PC2 = 0.6%), variance explained is very low so visual patterns should be interpreted cautiously. Nevertheless, `TRUE` pooling samples form a clearly distinct cluster, consistent with the PERMANOVA results
+- Taken together, the stronger pooling effect under Jaccard than Aitchison across both PERMANOVA and PCoA raises the possibility that the extra ASVs introduced by `TRUE` pooling represent noise rather than true biological variants
+- **Omega, band size, and error model** produce no visible clustering in either ordination
+
+---
+
+*Full methods in `02_community_analyses.Rmd` and the project report.*
