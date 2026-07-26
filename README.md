@@ -49,8 +49,6 @@ Raw reads are processed by **DADA2**, whose tuneable parameters had never been s
 ```
 ecoli-flic-strain-dynamics/
 │
-├── README.md
-│
 ├── dependencies/                  ← environment files
 │   ├── env_dada2_final.yml        ← conda environment specification
 │   ├── start_env.sh               ← environment activation script
@@ -59,10 +57,9 @@ ecoli-flic-strain-dynamics/
 ├── pipeline/                      ← Part 1 · HPC cluster (UNIL)
 │   ├── sample_selection/          ← subsample to 10k reads/sample; select cohort samples
 │   ├── primer_trimming/           ← cutadapt primer removal
-│   ├── dada2/                     ← run DADA2 across all 96 parameter combinations
-│   │   ├── dada2_script.R
-│   │   └── run_dada2_script.sh
-│   └── README.md
+│   └── dada2/                     ← run DADA2 across all 96 parameter combinations
+│       ├── dada2_script.R
+│       └── run_dada2_script.sh
 │
 └── analysis/                      ← Part 2 · local
     ├── 02_community_analyses/     ← ASV sharing · PERMANOVA · PCoA · dendrograms
@@ -72,15 +69,12 @@ ecoli-flic-strain-dynamics/
     └── 06_longitudinal_carriage/  ← E. coli carriage bubble plots per subject
 ```
 
-Each folder in `analysis/` contains:
+Each `analysis/` step folder contains:
 ```
 0X_step_name/
-├── README.md       ← methods, how to run, and results with figures
-├── Scripts/        ← .Rmd and companion .R functions file
+├── Scripts/        ← .Rmd notebook + companion .R functions file
 └── Figures/        ← key output figures
 ```
-
-> Each `analysis/` subfolder has its own `README.md` with full methods, results, and figures.
 
 ---
 
@@ -170,7 +164,7 @@ rmarkdown::render("analysis/05_mock_qc/Scripts/05_Mock_Distributions.Rmd")
 rmarkdown::render("analysis/06_longitudinal_carriage/Scripts/06_Longitudinal_Carriage.Rmd")
 ```
 
-> ⚠️ **Step 04 has a manual BLAST step.** Generate FASTA files in section 3b, submit to [NCBI BLAST](https://blast.ncbi.nlm.nih.gov), download results as *Single-file JSON2*, and place in `data/blast/JSON/`. See `analysis/04_best_vs_standard/README.md`.
+> ⚠️ **Step 04 has a manual BLAST step.** Generate FASTA files in section 3b, submit to [NCBI BLAST](https://blast.ncbi.nlm.nih.gov), download results as *Single-file JSON2*, and place in `data/blast/JSON/`. See `analysis/04_best_vs_standard/` for full instructions.
 
 > ⚠️ **Step 06 requires step 04** to be completed first (`blast_df_parsed.csv` must exist).
 
@@ -179,4 +173,4 @@ rmarkdown::render("analysis/06_longitudinal_carriage/Scripts/06_Longitudinal_Car
 ## Contact
 
 Open an issue for questions about the code or data.  
-**Andrés Catalán Tatay** — University of Lausanne
+**Andrés Catalán Tatay** — University of Lausanne, Computational Biology Department
